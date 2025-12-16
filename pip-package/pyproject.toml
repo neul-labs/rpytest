@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rpytest"
+version = "0.1.0"
+description = "Rust-powered, drop-in replacement for pytest"
+readme = "README.md"
+license = {text = "MIT OR Apache-2.0"}
+requires-python = ">=3.9"
+authors = [
+    {name = "rpytest contributors"}
+]
+keywords = ["pytest", "testing", "rust", "performance"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "pytest>=7.0",
+    "msgpack>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest-xdist",
+    "pytest-cov",
+]
+
+[project.urls]
+Homepage = "https://github.com/user/rpytest"
+Repository = "https://github.com/user/rpytest"
+Issues = "https://github.com/user/rpytest/issues"
+
+[project.scripts]
+rpytest = "rpytest_cli:main"
+
+[project.entry-points.pytest11]
+rpytest = "rpytest_cli.plugin"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["rpytest_cli*"]
+
+[tool.setuptools.package-data]
+rpytest_cli = ["bin/*"]

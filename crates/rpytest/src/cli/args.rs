@@ -160,6 +160,67 @@ pub struct Cli {
     #[arg(long = "version", short = 'V')]
     pub version: bool,
 
+    // === Phase 5: Flakiness & Auto-Rerun ===
+    /// Rerun failed tests up to N times to detect flakiness.
+    #[arg(long = "reruns", value_name = "N")]
+    pub reruns: Option<u32>,
+
+    /// Delay in milliseconds between reruns.
+    #[arg(long = "reruns-delay", value_name = "MS")]
+    pub reruns_delay: Option<u32>,
+
+    /// Only rerun tests that are known to be flaky.
+    #[arg(long = "only-rerun-flaky")]
+    pub only_rerun_flaky: bool,
+
+    /// Show flakiness report after test run.
+    #[arg(long = "flaky-report")]
+    pub flaky_report: bool,
+
+    // === Phase 5: Sharding ===
+    /// Run only tests in shard N (0-indexed).
+    #[arg(long = "shard", value_name = "INDEX")]
+    pub shard: Option<u32>,
+
+    /// Total number of shards for distributed testing.
+    #[arg(long = "total-shards", value_name = "N")]
+    pub total_shards: Option<u32>,
+
+    /// Sharding strategy (hash, round_robin, duration_balanced).
+    #[arg(
+        long = "shard-strategy",
+        value_name = "STRATEGY",
+        value_parser = ["hash", "round_robin", "duration_balanced"],
+        default_value = "duration_balanced"
+    )]
+    pub shard_strategy: String,
+
+    // === Phase 5: Fixture Reuse ===
+    /// Enable session fixture reuse between runs.
+    #[arg(long = "reuse-fixtures")]
+    pub reuse_fixtures: bool,
+
+    /// Maximum age for reused fixtures in seconds.
+    #[arg(long = "fixture-max-age", value_name = "SECS", default_value = "600")]
+    pub fixture_max_age: u32,
+
+    // === Phase 7: Daemon Management ===
+    /// Show daemon status and health information.
+    #[arg(long = "daemon-status")]
+    pub daemon_status: bool,
+
+    /// Stop the running daemon.
+    #[arg(long = "daemon-stop")]
+    pub daemon_stop: bool,
+
+    /// Clean up stale test contexts and caches.
+    #[arg(long = "cleanup")]
+    pub cleanup: bool,
+
+    /// Maximum age in seconds for stale context cleanup (default: 3600).
+    #[arg(long = "cleanup-max-age", value_name = "SECS", default_value = "3600")]
+    pub cleanup_max_age: u64,
+
     // === Passthrough ===
     /// Unknown flags passed through to the daemon/plugins (use -- before them).
     #[arg(last = true, allow_hyphen_values = true)]

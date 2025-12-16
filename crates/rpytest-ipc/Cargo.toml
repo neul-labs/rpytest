@@ -9,6 +9,7 @@ description = "IPC transport layer for rpytest"
 [dependencies]
 rpytest-core = { workspace = true }
 tokio = { workspace = true }
+nng = { workspace = true }
 serde = { workspace = true }
 rmp-serde = { workspace = true }
 thiserror = { workspace = true }

@@ -8,7 +8,10 @@ description = "Core types and abstractions for rpytest"
 
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+sled = { workspace = true }
+rmp-serde = { workspace = true }
 
 [dev-dependencies]
-rmp-serde = { workspace = true }
+tempfile = { workspace = true }

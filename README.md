@@ -101,14 +101,59 @@ Because the shared daemon (and each repo’s context) persist between runs, repe
 
 See `docs/drop-in-compatibility.md` for the full compatibility plan and safeguards.
 
-## Roadmap at a glance
+## Current Status
 
-- [ ] Implement the Rust CLI skeleton with argparse/flag parity.
-- [ ] Build the Python daemon process with a stable IPC protocol.
-- [ ] Persist test inventory and history to disk for CI reuse.
-- [ ] Add optional session-fixture reuse for “turbo” iterative runs.
-- [ ] Expose an editor/IDE protocol for listing and running nearest tests instantly.
-- [ ] Ship a public benchmark suite comparing `rpytest` vs `python -m pytest` across representative projects.
-- [ ] Automate drop-in verification by running pytest’s own tests plus the plugin canary suite in CI.
+rpytest has completed implementation of Phases 0-7 of the roadmap:
 
-See `docs/`—especially `docs/roadmap.md`—for deeper dives into the milestones that lead to full functionality.
+- [x] **Phase 0**: Rust CLI skeleton with pytest flag parity
+- [x] **Phase 1**: Python daemon process with async-nng IPC
+- [x] **Phase 2**: Inventory & sled persistence with caching
+- [x] **Phase 3**: Worker pool & parallel scheduling
+- [x] **Phase 4**: Watch mode & editor protocol integration
+- [x] **Phase 5**: Turbo features (flakiness detection, fixture reuse, sharding)
+- [x] **Phase 6**: Verification harness & benchmark suite
+- [x] **Phase 7**: Release readiness (packaging, crash recovery, documentation)
+
+See `docs/roadmap.md` for detailed milestone descriptions.
+
+## New in Latest Release
+
+### Daemon Management
+```bash
+# Check daemon status and health
+rpytest --daemon-status
+
+# Stop the running daemon
+rpytest --daemon-stop
+
+# Clean up stale contexts
+rpytest --cleanup
+rpytest --cleanup --cleanup-max-age 7200
+```
+
+### Flakiness Detection & Auto-Rerun
+```bash
+# Rerun failed tests up to 3 times
+rpytest --reruns 3 --reruns-delay 1000
+
+# Only rerun known flaky tests
+rpytest --only-rerun-flaky
+
+# Show flakiness report
+rpytest --flaky-report
+```
+
+### Sharding for Distributed Testing
+```bash
+# Run shard 0 of 4 total shards
+rpytest --shard 0 --total-shards 4
+
+# Use duration-balanced sharding strategy
+rpytest --shard 1 --total-shards 4 --shard-strategy duration_balanced
+```
+
+### Session Fixture Reuse
+```bash
+# Enable fixture reuse between runs
+rpytest --reuse-fixtures --fixture-max-age 600
+```
