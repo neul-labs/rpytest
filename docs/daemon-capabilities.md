@@ -19,7 +19,7 @@ The long-lived Python daemon is central to rpytest’s performance and ergonomic
 
 - File changes invalidate only the relevant modules, so the daemon re-collects a minimal slice of the tree.
 - Large suites avoid paying the full-collection tax on every command; only the first run needs a full pass.
-- ryv provides the dependency graph that links file edits to concrete pytest nodes, ensuring incremental updates stay accurate even in complex packages.
+- The `notify` crate detects file changes while a dependency graph (serialized efficiently via `rkyv`) links edits to concrete pytest nodes, ensuring incremental updates stay accurate even in complex packages.
 
 ## Watch mode
 

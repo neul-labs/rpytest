@@ -2,6 +2,42 @@
 
 Rust-powered, drop-in replacement for `python -m pytest` that slashes collection and orchestration overhead while keeping your existing tests, fixtures, and plugins untouched.
 
+## Installation
+
+```bash
+# From crates.io (once published)
+cargo install rpytest
+
+# From source
+git clone https://github.com/user/rpytest.git
+cd rpytest
+cargo build --release
+cp target/release/rpytest ~/.local/bin/
+```
+
+Ensure the binary is on your `PATH` and that your Python environment has pytest installed.
+
+## Quick start
+
+```bash
+# Run all tests (just like pytest)
+rpytest
+
+# Run specific tests
+rpytest tests/test_api.py::test_login
+
+# Filter by keyword or marker
+rpytest -k "auth" -m "not slow"
+
+# Watch mode for TDD
+rpytest --watch
+
+# Verify drop-in compatibility
+rpytest --verify-dropin
+```
+
+The first invocation spawns a background daemon and collects your test suite. Subsequent runs reuse the warm daemon for near-instant startup.
+
 ## What rpytest delivers
 
 - **Drop-in CLI compatibility** – mirrors the pytest command surface so existing workflows, scripts, and CI jobs continue to run unchanged.
@@ -33,8 +69,8 @@ rpytest’s core bet is that by shrinking the non-test portion close to zero, ov
 
 ## How it works
 
-1. **One-time warm-up** – the first invocation spawns a long-lived Python daemon that imports pytest, plugins, and your application.
-2. **Inventory creation** – the daemon collects the suite once, storing identifiers, markers, file locations, and recent timings.
+1. **One-time warm-up** – the first `rpytest` invocation on a host spawns a long-lived Python daemon. New repositories register their own execution context inside that process the first time they connect.
+2. **Inventory creation** – within each context, the daemon collects the suite once, storing identifiers, markers, file locations, and recent timings.
 3. **Rust-side filtering** – the CLI consumes the inventory to process flags like `-k`, `-m`, `--maxfail`, or explicit node IDs without waking Python.
 4. **Warm worker pool** – the daemon maintains worker interpreters ready to run tests, drastically cutting process spawn and import time.
 5. **Result streaming & caching** – results stream back to Rust immediately for reporting, aggregation, XML/JUnit generation, and durability.
@@ -43,9 +79,9 @@ rpytest’s core bet is that by shrinking the non-test portion close to zero, ov
 
 - **async-nng** powers the duplex, low-latency transport between the Rust CLI and the Python daemon, enabling high-volume event streaming without blocking test execution.
 - **sled** stores the persisted inventory, duration history, and daemon metadata under `.rpytest/`, so restarts and CI jobs can resume instantly with warm caches.
-- **ryv** tracks filesystem events and dependency relationships, feeding incremental collection, watch mode, and “run affected tests” workflows.
+- **notify** watches filesystem events while **rkyv** enables zero-copy serialization of inventory and dependency data, together feeding incremental collection, watch mode, and "run affected tests" workflows.
 
-Because the daemon persists between runs, repeated commands (local TDD loops, CI retries, `--last-failed`, etc.) become simple RPC calls instead of full interpreter startups.
+Because the shared daemon (and each repo’s context) persist between runs, repeated commands (local TDD loops, CI retries, `--last-failed`, etc.) become simple RPC calls instead of full interpreter startups.
 
 ## Ergonomic workflows
 
@@ -72,5 +108,7 @@ See `docs/drop-in-compatibility.md` for the full compatibility plan and safeguar
 - [ ] Persist test inventory and history to disk for CI reuse.
 - [ ] Add optional session-fixture reuse for “turbo” iterative runs.
 - [ ] Expose an editor/IDE protocol for listing and running nearest tests instantly.
+- [ ] Ship a public benchmark suite comparing `rpytest` vs `python -m pytest` across representative projects.
+- [ ] Automate drop-in verification by running pytest’s own tests plus the plugin canary suite in CI.
 
-See `docs/` for deeper dives into the daemon architecture and the capabilities it unlocks.
+See `docs/`—especially `docs/roadmap.md`—for deeper dives into the milestones that lead to full functionality.

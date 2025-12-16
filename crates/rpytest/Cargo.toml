@@ -1,0 +1,32 @@
+[package]
+name = "rpytest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Rust-powered, drop-in replacement for pytest"
+
+[[bin]]
+name = "rpytest"
+path = "src/main.rs"
+
+[dependencies]
+rpytest-core = { workspace = true }
+rpytest-ipc = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+configparser = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+console = { workspace = true }
+which = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+tempfile = { workspace = true }

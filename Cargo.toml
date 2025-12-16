@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rpytest",
+    "crates/rpytest-core",
+    "crates/rpytest-ipc",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/user/rpytest"
+authors = ["rpytest contributors"]
+
+[workspace.dependencies]
+# CLI
+clap = { version = "4.5", features = ["derive", "env", "string"] }
+
+# Async
+tokio = { version = "1.40", features = ["rt-multi-thread", "net", "sync", "time", "fs", "signal", "io-util"] }
+
+# IPC
+nng = "1.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+rmp-serde = "1.3"
+
+# Storage (behind abstraction)
+sled = "0.34"
+
+# Config parsing
+toml = "0.8"
+configparser = "3.1"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Terminal
+console = "0.15"
+
+# Process utilities
+which = "7.0"
+libc = "0.2"
+
+# Internal crates
+rpytest-core = { path = "crates/rpytest-core" }
+rpytest-ipc = { path = "crates/rpytest-ipc" }
+
+[workspace.dependencies.assert_cmd]
+version = "2.0"
+
+[workspace.dependencies.predicates]
+version = "3.1"
+
+[workspace.dependencies.tempfile]
+version = "3.13"

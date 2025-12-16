@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rpytest-daemon"
+version = "0.1.0"
+description = "Python daemon for rpytest test execution"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT OR Apache-2.0"}
+dependencies = [
+    "pynng>=0.8.0",
+    "msgpack>=1.0.0",
+    "pytest>=7.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[project.scripts]
+rpytest-daemon = "rpytest_daemon.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
