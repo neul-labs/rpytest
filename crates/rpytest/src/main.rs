@@ -317,6 +317,50 @@ async fn handle_inventory_status(cli: &Cli, root: &std::path::Path) -> Result<()
     Ok(())
 }
 
+/// Filter node IDs by path patterns specified on command line.
+/// Supports:
+/// - Exact node IDs: "test_file.py::TestClass::test_method"
+/// - File paths: "test_file.py" or "tests/test_file.py"
+/// - Directory paths: "tests/"
+/// - Partial matches: "test_file.py::TestClass" (matches all methods in class)
+fn filter_by_paths(node_ids: &[String], paths: &[String]) -> Vec<String> {
+    if paths.is_empty() {
+        return node_ids.to_vec();
+    }
+
+    node_ids
+        .iter()
+        .filter(|node_id| {
+            paths.iter().any(|path| {
+                // Exact match (full node ID specified)
+                if node_id.as_str() == path {
+                    return true;
+                }
+                // Node ID starts with path (e.g., path="test.py::TestClass" matches "test.py::TestClass::test_method")
+                if node_id.starts_with(path) {
+                    return true;
+                }
+                // File path match (e.g., path="test_foo.py" matches "test_foo.py::test_bar")
+                if let Some(file_part) = node_id.split("::").next() {
+                    if file_part == path || file_part.ends_with(&format!("/{}", path)) {
+                        return true;
+                    }
+                    // Directory match
+                    if path.ends_with('/') && file_part.starts_with(path) {
+                        return true;
+                    }
+                    // Also check without trailing slash
+                    if file_part.starts_with(&format!("{}/", path)) {
+                        return true;
+                    }
+                }
+                false
+            })
+        })
+        .cloned()
+        .collect()
+}
+
 async fn handle_run(cli: &Cli, root: &std::path::Path) -> Result<()> {
     let output = Output::new(cli.verbose, cli.quiet);
 
@@ -366,7 +410,7 @@ async fn handle_run(cli: &Cli, root: &std::path::Path) -> Result<()> {
     };
 
     // Check cache validity and get filtered tests
-    let node_ids = if cli.keyword.is_some() || cli.marker.is_some() {
+    let all_node_ids = if cli.keyword.is_some() || cli.marker.is_some() {
         // We have filters - try to use cache for Rust-side filtering
         let cache_valid = cache
             .is_cache_valid(&context_id, &inventory_hash)
@@ -456,6 +500,20 @@ async fn handle_run(cli: &Cli, root: &std::path::Path) -> Result<()> {
                 anyhow::bail!("Unexpected response");
             }
         }
+    };
+
+    // Apply path filtering if paths were specified on command line
+    let node_ids = if cli.paths.is_empty() {
+        all_node_ids
+    } else {
+        let filtered = filter_by_paths(&all_node_ids, &cli.paths);
+        debug!(
+            "Filtered {} tests to {} based on paths: {:?}",
+            all_node_ids.len(),
+            filtered.len(),
+            cli.paths
+        );
+        filtered
     };
 
     if node_ids.is_empty() {

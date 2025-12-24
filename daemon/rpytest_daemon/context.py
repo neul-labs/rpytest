@@ -17,6 +17,10 @@ from .streaming import StreamingRun, StreamingRunManager, execute_streaming_run
 from .flakiness import FlakinessTracker, determine_final_outcome, RerunResult
 from .fixtures import SessionFixtureManager, FixtureConfig
 from .sharding import TestSharder, ShardConfig
+from .executor import BatchExecutor, InProcessExecutor, TestResult as ExecutorTestResult
+from .warm_worker import get_warm_pool, WarmWorkerPool, TestResult as WarmTestResult
+from .native_collector import NativeCollector, NativeTestNode
+from .direct_executor import DirectExecutor, DirectTestResult
 
 logger = logging.getLogger(__name__)
 
@@ -126,12 +130,328 @@ class RepoContext:
         self._sharder = TestSharder()
         self._rerun_config = RerunConfig()  # Auto-rerun settings
 
+        # Native collection and direct execution
+        self._native_collector: Optional[NativeCollector] = None
+        self._direct_executor: Optional[DirectExecutor] = None
+        self._native_tests: Dict[str, NativeTestNode] = {}  # Cache of native test info
+        self._use_native: bool = True  # Enable native collection/execution
+
     def collect(self, force: bool = False) -> Tuple[int, int]:
         """
-        Collect tests using pytest --collect-only.
+        Collect tests using cached inventory or in-process pytest collection.
+
+        Optimization priority:
+        1. If cache is valid AND inventory loaded -> return immediately
+        2. If cache is valid but inventory not loaded -> load from disk
+        3. Otherwise -> run pytest collection
 
         Returns (node_count, duration_ms).
         """
+        start_time = time.time()
+
+        # Fast path: cache valid and inventory already in memory
+        if not force and self.inventory and self._is_cache_valid():
+            duration_ms = int((time.time() - start_time) * 1000)
+            logger.debug(f"Using in-memory inventory: {len(self.inventory)} tests ({duration_ms}ms)")
+            return len(self.inventory), duration_ms
+
+        # Medium path: load from disk cache
+        if not force and self._is_cache_valid():
+            if self._load_inventory_cache():
+                # Also populate native test info for hybrid execution
+                if self._use_native and not self._native_tests:
+                    self._populate_native_test_info()
+                duration_ms = int((time.time() - start_time) * 1000)
+                logger.info(f"Loaded inventory from cache: {len(self.inventory)} tests ({duration_ms}ms)")
+                return len(self.inventory), duration_ms
+
+        logger.info(f"Collecting tests in {self.repo_path}")
+
+        # Try native collection first (fastest)
+        if self._use_native:
+            try:
+                count, duration = self._collect_native()
+                self._update_cache_state()
+                return count, duration
+            except Exception as e:
+                logger.warning(f"Native collection failed, falling back to pytest: {e}")
+
+        # Fall back to pytest collection
+        try:
+            count, duration = self._collect_inprocess()
+            self._update_cache_state()
+            return count, duration
+        except Exception as e:
+            logger.warning(f"In-process collection failed, falling back to subprocess: {e}")
+            result = self._collect_subprocess()
+            self._update_cache_state()
+            return result
+
+    def _collect_native(self) -> Tuple[int, int]:
+        """Collect tests using native AST parsing (fastest).
+
+        This bypasses pytest entirely for collection, providing ~6x speedup.
+        """
+        start_time = time.time()
+
+        if self._native_collector is None:
+            self._native_collector = NativeCollector(self.repo_path)
+
+        native_tests = self._native_collector.collect()
+        self._native_tests = native_tests
+
+        # Convert to standard inventory format
+        self.inventory.clear()
+        for node_id, native_node in native_tests.items():
+            self.inventory[node_id] = TestNode(
+                node_id=native_node.node_id,
+                file_path=native_node.file_path,
+                name=native_node.name,
+                class_name=native_node.class_name,
+                line_number=native_node.line_number,
+                markers=native_node.markers,
+            )
+
+        # Compute inventory hash
+        inventory_str = json.dumps(sorted(self.inventory.keys()))
+        self.inventory_hash = hashlib.sha256(inventory_str.encode()).hexdigest()[:16]
+        self.last_collection_time = time.time()
+
+        duration_ms = int((time.time() - start_time) * 1000)
+        logger.info(f"Native collected {len(self.inventory)} tests in {duration_ms}ms")
+
+        return len(self.inventory), duration_ms
+
+    def _populate_native_test_info(self):
+        """Populate native test info for hybrid execution.
+
+        Called when loading from cache to enable direct execution of simple tests.
+        """
+        if self._native_collector is None:
+            self._native_collector = NativeCollector(self.repo_path)
+
+        # Run native collection to get is_simple classification
+        native_tests = self._native_collector.collect()
+        self._native_tests = native_tests
+
+        simple_count = sum(1 for t in native_tests.values() if t.is_simple)
+        logger.debug(f"Native test info: {simple_count} simple, {len(native_tests) - simple_count} complex")
+
+    def _is_cache_valid(self) -> bool:
+        """Check if the cached inventory is still valid.
+
+        Uses fast validation by checking directory mtime first, then
+        only checking individual files if needed.
+        """
+        cache_file = self.repo_path / ".rpytest" / "cache_state.json"
+        if not cache_file.exists():
+            return False
+
+        try:
+            cache_mtime = cache_file.stat().st_mtime
+
+            # Fast check: if test directories haven't been modified since cache,
+            # we can skip individual file checks
+            test_dirs = set()
+            for pattern in ["**/test_*.py", "**/*_test.py"]:
+                for path in self.repo_path.glob(pattern):
+                    test_dirs.add(path.parent)
+
+            dirs_unchanged = True
+            for test_dir in test_dirs:
+                if test_dir.stat().st_mtime > cache_mtime:
+                    dirs_unchanged = False
+                    break
+
+            if dirs_unchanged and self.inventory:
+                # Directories unchanged and we have inventory - cache is valid
+                return True
+
+            # Need to do detailed check
+            with open(cache_file) as f:
+                cache_state = json.load(f)
+
+            # Check file modification times
+            for file_path, mtime in cache_state.get("file_mtimes", {}).items():
+                full_path = self.repo_path / file_path
+                if full_path.exists():
+                    if full_path.stat().st_mtime > mtime:
+                        logger.debug(f"File changed: {file_path}")
+                        return False
+                else:
+                    # File was deleted
+                    return False
+
+            # Check for new test files
+            current_files = set(self._find_test_files())
+            cached_files = set(cache_state.get("file_mtimes", {}).keys())
+            if current_files != cached_files:
+                logger.debug("Test file set changed")
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.debug(f"Cache validation failed: {e}")
+            return False
+
+    def _update_cache_state(self):
+        """Update the cache state after collection."""
+        cache_dir = self.repo_path / ".rpytest"
+        cache_dir.mkdir(exist_ok=True)
+
+        # Record file modification times
+        file_mtimes = {}
+        for file_path in self._find_test_files():
+            full_path = self.repo_path / file_path
+            if full_path.exists():
+                file_mtimes[file_path] = full_path.stat().st_mtime
+
+        cache_state = {
+            "inventory_hash": self.inventory_hash,
+            "file_mtimes": file_mtimes,
+            "timestamp": time.time(),
+        }
+
+        cache_file = cache_dir / "cache_state.json"
+        with open(cache_file, "w") as f:
+            json.dump(cache_state, f)
+
+        # Also save inventory to disk for fast loading
+        self._save_inventory_cache()
+
+    def _save_inventory_cache(self):
+        """Save inventory to disk for fast loading."""
+        cache_dir = self.repo_path / ".rpytest"
+        cache_dir.mkdir(exist_ok=True)
+
+        inventory_cache = {
+            "inventory_hash": self.inventory_hash,
+            "last_collection_time": self.last_collection_time,
+            "nodes": {
+                node_id: {
+                    "node_id": node.node_id,
+                    "file_path": node.file_path,
+                    "name": node.name,
+                    "class_name": node.class_name,
+                    "line_number": node.line_number,
+                    "markers": node.markers,
+                    "keywords": node.keywords,
+                    "skip": node.skip,
+                    "xfail": node.xfail,
+                }
+                for node_id, node in self.inventory.items()
+            }
+        }
+
+        cache_file = cache_dir / "inventory_cache.json"
+        with open(cache_file, "w") as f:
+            json.dump(inventory_cache, f)
+
+    def _load_inventory_cache(self) -> bool:
+        """Load inventory from disk cache. Returns True if successful."""
+        cache_file = self.repo_path / ".rpytest" / "inventory_cache.json"
+        if not cache_file.exists():
+            return False
+
+        try:
+            with open(cache_file) as f:
+                cache = json.load(f)
+
+            self.inventory_hash = cache.get("inventory_hash", "")
+            self.last_collection_time = cache.get("last_collection_time", 0)
+
+            self.inventory.clear()
+            for node_id, node_data in cache.get("nodes", {}).items():
+                self.inventory[node_id] = TestNode(
+                    node_id=node_data["node_id"],
+                    file_path=node_data["file_path"],
+                    name=node_data.get("name", ""),
+                    class_name=node_data.get("class_name"),
+                    line_number=node_data.get("line_number"),
+                    markers=node_data.get("markers", []),
+                    keywords=node_data.get("keywords", []),
+                    skip=node_data.get("skip", False),
+                    xfail=node_data.get("xfail", False),
+                )
+
+            logger.debug(f"Loaded {len(self.inventory)} tests from cache")
+            return True
+
+        except Exception as e:
+            logger.debug(f"Failed to load inventory cache: {e}")
+            return False
+
+    def _find_test_files(self) -> List[str]:
+        """Find all test files in the repo."""
+        test_files = []
+        for pattern in ["**/test_*.py", "**/*_test.py"]:
+            for path in self.repo_path.glob(pattern):
+                # Skip venv and other common exclusions
+                path_str = str(path.relative_to(self.repo_path))
+                if not any(excl in path_str for excl in [".venv", "venv", "__pycache__", ".git", "node_modules"]):
+                    test_files.append(path_str)
+        return sorted(test_files)
+
+    def _collect_inprocess(self) -> Tuple[int, int]:
+        """Collect tests using in-process pytest (fast)."""
+        import pytest
+        import os
+
+        start_time = time.time()
+
+        class CollectorPlugin:
+            """Plugin to collect test items."""
+            def __init__(self):
+                self.items = []
+
+            def pytest_collection_modifyitems(self, items):
+                self.items = items
+
+        collector = CollectorPlugin()
+
+        # Change to repo directory
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(self.repo_path)
+
+            # Run pytest in collection-only mode
+            pytest.main(
+                ["--collect-only", "-q", "--ignore=daemon", "--ignore=.venv"],
+                plugins=[collector],
+            )
+
+        finally:
+            os.chdir(old_cwd)
+
+        # Parse collected items
+        self.inventory.clear()
+        for item in collector.items:
+            node_id = item.nodeid
+            node = self._parse_node_id(node_id)
+
+            # Extract markers
+            markers = [m.name for m in item.iter_markers()]
+            node.markers = markers
+
+            # Extract line number if available
+            if hasattr(item, 'location') and item.location:
+                node.line_number = item.location[1]
+
+            self.inventory[node_id] = node
+
+        # Compute inventory hash
+        inventory_str = json.dumps(sorted(self.inventory.keys()))
+        self.inventory_hash = hashlib.sha256(inventory_str.encode()).hexdigest()[:16]
+        self.last_collection_time = time.time()
+
+        duration_ms = int((time.time() - start_time) * 1000)
+        logger.info(f"Collected {len(self.inventory)} tests in {duration_ms}ms (in-process)")
+
+        return len(self.inventory), duration_ms
+
+    def _collect_subprocess(self) -> Tuple[int, int]:
+        """Collect tests using subprocess (fallback)."""
         start_time = time.time()
 
         # Run pytest --collect-only with quiet output
@@ -142,8 +462,6 @@ class RepoContext:
             "-q",
             "--no-header",
         ]
-
-        logger.info(f"Collecting tests in {self.repo_path}")
 
         try:
             result = subprocess.run(
@@ -180,7 +498,7 @@ class RepoContext:
         self.last_collection_time = time.time()
 
         duration_ms = int((time.time() - start_time) * 1000)
-        logger.info(f"Collected {len(self.inventory)} tests in {duration_ms}ms")
+        logger.info(f"Collected {len(self.inventory)} tests in {duration_ms}ms (subprocess)")
 
         return len(self.inventory), duration_ms
 
@@ -348,60 +666,95 @@ class RepoContext:
         num_workers: Optional[int],
         start_time: float,
     ) -> RunSummary:
-        """Run tests in parallel using worker pool."""
-        pool = self._ensure_worker_pool(num_workers or 0)
+        """Run tests using hybrid execution: direct for simple tests, pytest for complex.
 
-        logger.info(f"Running {len(node_ids)} tests in parallel ({pool.num_workers} workers)")
+        This provides maximum performance by:
+        1. Running simple tests directly (no pytest overhead)
+        2. Running complex tests (fixtures, params) via warm workers
+        """
+        # Partition tests into simple (direct execution) and complex (pytest)
+        simple_tests = []
+        complex_tests = []
 
-        # Submit tests to the pool
-        pool.submit_tests(node_ids, self.repo_path, self.python_path)
+        if self._use_native and self._native_tests:
+            for node_id in node_ids:
+                native_node = self._native_tests.get(node_id)
+                if native_node and native_node.is_simple:
+                    simple_tests.append(node_id)
+                else:
+                    complex_tests.append(node_id)
+        else:
+            # No native test info - run all via pytest
+            complex_tests = node_ids
 
-        # Collect results
-        worker_results = pool.collect_results(len(node_ids))
+        logger.info(
+            f"Hybrid execution: {len(simple_tests)} simple (direct), "
+            f"{len(complex_tests)} complex (pytest)"
+        )
 
-        # Convert worker results to TestResult and count outcomes
         passed = 0
         failed = 0
         skipped = 0
         errors = 0
         results = []
-        fail_count = 0
 
-        for wr in worker_results:
-            outcome = wr.outcome
-            if outcome == "passed":
-                passed += 1
-            elif outcome == "failed":
-                failed += 1
-                fail_count += 1
-            elif outcome == "skipped":
-                skipped += 1
-            else:
-                errors += 1
-                fail_count += 1
+        # Execute simple tests directly (ultra-fast path)
+        if simple_tests:
+            if self._direct_executor is None:
+                self._direct_executor = DirectExecutor(self.repo_path)
 
-            results.append(TestResult(
-                node_id=wr.node_id,
-                outcome=outcome,
-                duration_ms=wr.duration_ms,
-                message=wr.message,
-                stdout=wr.stdout,
-                stderr=wr.stderr,
-            ))
+            direct_results = self._direct_executor.execute_tests(simple_tests)
 
-            # Update history
-            self._update_history(wr.node_id, outcome, wr.duration_ms)
+            for dr in direct_results:
+                if dr.outcome == "passed":
+                    passed += 1
+                elif dr.outcome == "failed":
+                    failed += 1
+                else:
+                    errors += 1
 
-            # Check maxfail
-            if maxfail and fail_count >= maxfail:
-                logger.info(f"Stopping after {fail_count} failures (maxfail={maxfail})")
-                break
+                results.append(TestResult(
+                    node_id=dr.node_id,
+                    outcome=dr.outcome,
+                    duration_ms=dr.duration_ms,
+                    message=dr.message,
+                ))
+                self._update_history(dr.node_id, dr.outcome, dr.duration_ms)
+
+        # Execute complex tests via warm workers
+        if complex_tests:
+            pool = get_warm_pool(num_workers or 0)
+            warm_results = pool.run_tests(complex_tests, self.repo_path, batch_size=50)
+
+            for wr in warm_results:
+                outcome = wr.outcome
+                if outcome == "passed":
+                    passed += 1
+                elif outcome == "failed":
+                    failed += 1
+                elif outcome == "skipped":
+                    skipped += 1
+                elif outcome in ("xfail", "xpass"):
+                    if outcome == "xfail":
+                        skipped += 1
+                    else:
+                        failed += 1
+                else:
+                    errors += 1
+
+                results.append(TestResult(
+                    node_id=wr.node_id,
+                    outcome=outcome,
+                    duration_ms=wr.duration_ms,
+                    message=wr.message,
+                ))
+                self._update_history(wr.node_id, outcome, wr.duration_ms)
 
         duration_ms = int((time.time() - start_time) * 1000)
         total = passed + failed + skipped + errors
 
         logger.info(
-            f"Parallel run complete: {total} tests, "
+            f"Hybrid execution complete: {total} tests, "
             f"{passed} passed, {failed} failed, "
             f"{skipped} skipped, {errors} errors "
             f"in {duration_ms}ms"
@@ -821,10 +1174,15 @@ class RepoContext:
 
 
 class ContextRegistry:
-    """Registry of repository contexts."""
+    """Registry of repository contexts.
+
+    Supports context persistence - reuses existing contexts for the same
+    repo path to avoid repeated collection overhead.
+    """
 
     def __init__(self):
         self._contexts: Dict[str, RepoContext] = {}
+        self._contexts_by_path: Dict[str, str] = {}  # repo_path -> context_id
         self._counter: int = 0
 
     def create_context(
@@ -832,13 +1190,27 @@ class ContextRegistry:
         repo_path: str,
         python_path: Optional[str] = None,
     ) -> RepoContext:
-        """Create a new repository context."""
-        self._counter += 1
-        context_id = f"ctx-{self._counter:04d}"
+        """Get or create a repository context.
 
+        If a context already exists for this repo path, returns it.
+        Otherwise creates a new one.
+        """
         path = Path(repo_path).resolve()
         if not path.exists():
             raise ValueError(f"Repository path does not exist: {repo_path}")
+
+        path_str = str(path)
+
+        # Check if we already have a context for this path
+        if path_str in self._contexts_by_path:
+            existing_id = self._contexts_by_path[path_str]
+            if existing_id in self._contexts:
+                logger.debug(f"Reusing existing context {existing_id} for {path}")
+                return self._contexts[existing_id]
+
+        # Create new context
+        self._counter += 1
+        context_id = f"ctx-{self._counter:04d}"
 
         py_path = Path(python_path) if python_path else None
 
@@ -849,6 +1221,7 @@ class ContextRegistry:
         )
 
         self._contexts[context_id] = context
+        self._contexts_by_path[path_str] = context_id
         logger.info(f"Created context {context_id} for {path}")
 
         return context
