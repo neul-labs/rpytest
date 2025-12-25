@@ -117,6 +117,10 @@ pub struct Cli {
     pub plugins: Vec<String>,
 
     // === Output Formats ===
+    /// Output machine-readable JSON format (for AI agents and automation).
+    #[arg(long = "json", visible_alias = "machine")]
+    pub json: bool,
+
     /// Create JUnit XML report at the given path.
     #[arg(long = "junitxml", value_name = "PATH")]
     pub junitxml: Option<PathBuf>,

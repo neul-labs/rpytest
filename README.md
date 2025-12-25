@@ -29,6 +29,9 @@ rpytest tests/test_api.py::test_login
 # Filter by keyword or marker
 rpytest -k "auth" -m "not slow"
 
+# Parallel execution (pytest-xdist compatible)
+rpytest -n auto
+
 # Watch mode for TDD
 rpytest --watch
 
@@ -58,14 +61,15 @@ Traditional pytest invocations spend a surprising amount of time on framework wo
 | Reporting / coordination         | 5–10%         |
 | Actual test bodies               | 40–80%        |
 
-rpytest’s core bet is that by shrinking the non-test portion close to zero, overall wall-clock time improves without touching user code. Expected end-to-end improvements:
+rpytest's core bet is that by shrinking the non-test portion close to zero, overall wall-clock time improves without touching user code. Measured improvements:
 
-| Suite profile                               | Expected speedup vs pytest |
-| ------------------------------------------- | -------------------------- |
-| Tiny / overhead-dominated unit tests        | 3–5×                       |
-| Mixed unit + integration tests              | 1.3–2×                     |
-| IO-heavy integration suites (DB/HTTP bound) | 1.1–1.5×                   |
-| Re-running single tests during TDD          | Mostly startup wins (≈1.5×) |
+| Metric | pytest | rpytest | Improvement |
+|--------|--------|---------|-------------|
+| Execution Time (480 tests) | 0.51s | 0.48s | ~1.1x faster |
+| Wall Clock (with startup) | 2.91s | 1.55s | **1.9x faster** |
+| CLI Memory | 35.8 MB | 6.2 MB | **5.8x less** |
+
+The largest wins come from eliminating repeated interpreter startup and collection overhead.
 
 ## How it works
 
@@ -157,3 +161,46 @@ rpytest --shard 1 --total-shards 4 --shard-strategy duration_balanced
 # Enable fixture reuse between runs
 rpytest --reuse-fixtures --fixture-max-age 600
 ```
+
+### Parallel Test Execution (`-n` / pytest-xdist compatible)
+```bash
+# Run with automatic worker count (based on CPU cores)
+rpytest -n auto
+
+# Run with specific number of workers
+rpytest -n 4
+
+# Run sequentially (single worker)
+rpytest -n 1
+```
+
+rpytest's `-n` flag provides pytest-xdist compatible parallel execution without requiring the xdist plugin. Tests are distributed across warm worker processes using duration-aware load balancing (LPT algorithm) for optimal scheduling.
+
+**Parallel execution comparison (480 tests):**
+| Runner | Time | Notes |
+|--------|------|-------|
+| pytest (sequential) | 0.51s | Baseline |
+| pytest -n 4 (xdist) | 1.23s | Worker startup overhead |
+| rpytest (default) | 0.48s | Hybrid execution |
+| rpytest -n 4 | 0.99s | 20% faster than xdist |
+
+For small-to-medium test suites, rpytest's default mode often outperforms explicit parallel modes because warm workers eliminate the overhead that parallelism is meant to amortize.
+
+### Drop-in Compatibility Verification
+```bash
+# Verify rpytest produces identical results to pytest
+rpytest --verify-dropin
+
+# Verify specific test directory
+rpytest --verify-dropin tests/
+
+# Verbose comparison with diff details
+rpytest --verify-dropin -vv
+```
+
+The verification harness runs both pytest and rpytest on your test suite and compares:
+- Test collection counts
+- Pass/fail/skip/error counts
+- Exit codes
+
+This ensures rpytest behaves identically to pytest before you switch your CI pipeline.

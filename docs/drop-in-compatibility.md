@@ -25,3 +25,41 @@ This document describes how rpytest maintains behavioral parity with upstream py
 4. Monitor cache directories (default `.rpytest/`) into your CI artifacts if you want to benefit from sled-backed inventories between stages; otherwise they can be safely discarded.
 
 By enforcing the safeguards above and keeping enhancements opt-in, rpytest stays a true drop-in replacement while delivering the performance advantages described elsewhere in the docs.
+
+## pytest-xdist compatibility
+
+rpytest provides built-in parallel execution that is compatible with pytest-xdist's `-n` flag:
+
+```bash
+# These work identically in both pytest-xdist and rpytest
+rpytest -n auto          # Auto-detect CPU count
+rpytest -n 4             # Use 4 workers
+rpytest -n 1             # Sequential execution
+```
+
+**Key differences from pytest-xdist:**
+
+| Feature | pytest-xdist | rpytest |
+|---------|--------------|---------|
+| Installation | Requires `pip install pytest-xdist` | Built-in, no plugin needed |
+| Worker startup | Cold start per run | Warm workers (pre-loaded pytest) |
+| Load balancing | Various strategies (`load`, `loadscope`, etc.) | Duration-aware LPT scheduling |
+| Distributed testing | SSH/socket to remote machines | Local only (sharding for CI) |
+
+**What's supported:**
+- `-n auto` / `-n <number>` for parallel execution
+- Duration-aware load balancing for optimal scheduling
+- Session-scoped fixtures work correctly across workers
+
+**What's different:**
+- Distribution strategies (`--dist loadscope`, etc.) are not yet implemented
+- Remote execution (`--tx ssh=...`) is not supported; use `--shard` for CI parallelism instead
+
+For distributed CI testing across machines, use rpytest's native sharding:
+
+```bash
+# In CI matrix jobs:
+rpytest --shard 0 --total-shards 4 --shard-strategy duration_balanced
+rpytest --shard 1 --total-shards 4 --shard-strategy duration_balanced
+# ... etc
+```

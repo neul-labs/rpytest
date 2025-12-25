@@ -33,6 +33,14 @@ The long-lived Python daemon is central to rpytest’s performance and ergonomic
 - Better scheduling becomes possible because duration history stays in RAM; rpytest can hand longer tests to idle workers proactively.
 - The same mechanism underpins cheaper parallelism locally and in CI compared to `pytest-xdist`.
 
+## Built-in parallel execution (`-n` flag)
+
+- rpytest provides pytest-xdist compatible `-n` support without requiring the plugin.
+- `-n auto` auto-detects CPU cores; `-n 4` uses exactly 4 workers.
+- Unlike xdist, workers are pre-warmed, eliminating cold start overhead.
+- Duration-aware load balancing (LPT algorithm) distributes tests optimally.
+- For small-to-medium test suites, the default hybrid execution often outperforms explicit `-n` modes because the warm daemon eliminates the overhead that parallel execution is meant to amortize.
+
 ## Cross-run history and heuristics
 
 - Durations, pass/fail streaks, and failure messages accumulate in memory and are optionally flushed to disk.
