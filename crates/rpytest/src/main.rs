@@ -154,8 +154,14 @@ async fn handle_collect_only(cli: &Cli, root: &std::path::Path) -> Result<()> {
 
     match response {
         Response::TestList { node_ids } => {
-            output.info(&format!("Collected {} tests:", node_ids.len()));
-            for node_id in &node_ids {
+            // Apply path filtering if paths were specified
+            let filtered_ids = if cli.paths.is_empty() {
+                node_ids
+            } else {
+                filter_by_paths(&node_ids, &cli.paths)
+            };
+            output.info(&format!("Collected {} tests:", filtered_ids.len()));
+            for node_id in &filtered_ids {
                 println!("  {}", node_id);
             }
         }

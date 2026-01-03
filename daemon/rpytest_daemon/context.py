@@ -738,7 +738,8 @@ class RepoContext:
                     if outcome == "xfail":
                         skipped += 1
                     else:
-                        failed += 1
+                        # xpass = unexpected pass, count as passed (unless strict mode)
+                        passed += 1
                 else:
                     errors += 1
 
@@ -847,6 +848,24 @@ class RepoContext:
                 results.append(TestResult(
                     node_id=node_id,
                     outcome="error",
+                    duration_ms=0,
+                ))
+            elif " XFAIL" in line:
+                # xfail counts as skipped (expected failure)
+                skipped += 1
+                node_id = line.split(" XFAIL")[0].strip()
+                results.append(TestResult(
+                    node_id=node_id,
+                    outcome="xfail",
+                    duration_ms=0,
+                ))
+            elif " XPASS" in line:
+                # xpass counts as passed (unexpected pass)
+                passed += 1
+                node_id = line.split(" XPASS")[0].strip()
+                results.append(TestResult(
+                    node_id=node_id,
+                    outcome="xpass",
                     duration_ms=0,
                 ))
 
