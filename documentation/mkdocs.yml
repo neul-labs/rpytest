@@ -1,0 +1,88 @@
+site_name: rpytest
+site_description: Rust-powered, drop-in replacement for pytest
+site_url: https://rpytest.dev
+repo_url: https://github.com/user/rpytest
+repo_name: rpytest
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: false
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition
+  - pymdownx.details
+  - tables
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - Quick Start: getting-started/quickstart.md
+      - Migration from pytest: getting-started/migration.md
+  - User Guide:
+      - CLI Reference: guide/cli.md
+      - Configuration: guide/configuration.md
+      - Test Selection: guide/selection.md
+      - Parallel Execution: guide/parallel.md
+      - Watch Mode: guide/watch.md
+  - Features:
+      - Sharding: features/sharding.md
+      - Flakiness Detection: features/flakiness.md
+      - Fixture Reuse: features/fixtures.md
+      - Editor Integration: features/editor.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Daemon: architecture/daemon.md
+      - Performance: architecture/performance.md
+  - Reference:
+      - Benchmarks: reference/benchmarks.md
+      - Compatibility: reference/compatibility.md
+      - Changelog: reference/changelog.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/user/rpytest

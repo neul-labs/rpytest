@@ -203,6 +203,42 @@ pub async fn is_daemon_running(path: impl AsRef<Path>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    // Integration tests would go here, but require a running daemon
-    // or a mock server. For now, we test the framing layer separately.
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_connect_nonexistent_socket() {
+        let tmp = tempdir().unwrap();
+        let socket_path = tmp.path().join("nonexistent.sock");
+
+        let result = DaemonClient::connect(&socket_path).await;
+        assert!(result.is_err());
+
+        match result {
+            Err(IpcError::DaemonNotRunning(_)) => {} // Expected
+            Err(e) => panic!("Unexpected error type: {:?}", e),
+            Ok(_) => panic!("Should have failed to connect"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_is_daemon_running_nonexistent() {
+        let tmp = tempdir().unwrap();
+        let socket_path = tmp.path().join("nonexistent.sock");
+
+        let running = is_daemon_running(&socket_path).await;
+        assert!(!running);
+    }
+
+    #[test]
+    fn test_ipc_error_display() {
+        let err = IpcError::ConnectionFailed("test error".to_string());
+        assert_eq!(err.to_string(), "Connection failed: test error");
+
+        let err = IpcError::DaemonNotRunning("/tmp/test.sock".to_string());
+        assert_eq!(err.to_string(), "Daemon not running at /tmp/test.sock");
+
+        let err = IpcError::Timeout(Duration::from_secs(5));
+        assert_eq!(err.to_string(), "Operation timed out after 5s");
+    }
 }

@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -446,14 +447,25 @@ fn normalize_output(output: &str) -> String {
     // - Version numbers
     // - ANSI escape codes
 
+    // Static regex patterns (compiled once)
+    static ANSI_RE: OnceLock<regex_lite::Regex> = OnceLock::new();
+    static TIMING_RE: OnceLock<regex_lite::Regex> = OnceLock::new();
+
+    let ansi_re = ANSI_RE.get_or_init(|| {
+        regex_lite::Regex::new(r"\x1b\[[0-9;]*m")
+            .expect("ANSI regex pattern is valid")
+    });
+    let timing_re = TIMING_RE.get_or_init(|| {
+        regex_lite::Regex::new(r"in \d+\.\d+s")
+            .expect("Timing regex pattern is valid")
+    });
+
     let mut normalized = output.to_string();
 
     // Remove ANSI escape codes
-    let ansi_re = regex_lite::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
     normalized = ansi_re.replace_all(&normalized, "").to_string();
 
     // Remove timing info (e.g., "in 1.23s")
-    let timing_re = regex_lite::Regex::new(r"in \d+\.\d+s").unwrap();
     normalized = timing_re.replace_all(&normalized, "in X.XXs").to_string();
 
     // Normalize whitespace

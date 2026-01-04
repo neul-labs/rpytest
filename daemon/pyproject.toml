@@ -19,6 +19,7 @@ dependencies = [
 dev = [
     "pytest",
     "pytest-asyncio",
+    "mypy",
 ]
 
 [project.scripts]
@@ -26,3 +27,18 @@ rpytest-daemon = "rpytest_daemon.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+norecursedirs = ["rpytest_daemon", ".git", "__pycache__", ".venv", "venv"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+ignore_missing_imports = true

@@ -1,1 +1,2 @@
 rpytest_daemon
+tests

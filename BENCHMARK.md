@@ -1,37 +1,37 @@
 # rpytest Benchmark Results
 
-Benchmarks comparing rpytest vs pytest performance on a test suite of 480 tests.
+Benchmarks comparing rpytest vs pytest performance on a test suite of 500 tests.
 
 **Test Environment:**
-- CPU: AMD Ryzen 9 (16 cores)
-- OS: Linux 6.17.7
+- CPU: AMD Ryzen 7 5700U (16 threads)
+- OS: Linux 6.14.0-37-generic
 - Python: 3.12.3
 - pytest: 9.0.2
-- pytest-xdist: 3.5.0
+- pytest-xdist: 3.8.0
 
 ## Summary
 
 | Metric | pytest | rpytest | Improvement |
 |--------|--------|---------|-------------|
-| Execution Time | 0.51s | 0.48s | **~1.1x faster** |
-| CLI Memory | 35.8 MB | 6.2 MB | **5.8x less** |
-| Wall Clock (with startup) | 2.91s | 1.55s | **1.9x faster** |
+| Execution Time | 0.30s | 0.25s | **1.2x faster** |
+| CLI Memory | 39.4 MB | 5.9 MB | **6.7x less** |
+| Wall Clock (with startup) | 0.63s | 0.32s | **2.0x faster** |
 
 ## Parallel Execution Comparison
 
 rpytest provides built-in `-n` support compatible with pytest-xdist, but without requiring the plugin.
 
-| Runner | Time (480 tests) | Notes |
+| Runner | Time (500 tests) | Notes |
 |--------|------------------|-------|
-| pytest (sequential) | 0.51s | Baseline |
-| pytest -n 4 (xdist) | 1.23s | Worker startup overhead |
-| pytest -n auto (xdist) | 3.06s | Many workers, high overhead |
-| rpytest (default) | 0.48s | Hybrid execution, warm workers |
-| rpytest -n 1 | 1.49s | Sequential mode |
-| rpytest -n 4 | 0.99s | **20% faster than xdist** |
-| rpytest -n auto | 1.12s | Warm worker pool |
+| pytest (sequential) | 0.30s | Baseline |
+| pytest -n 4 (xdist) | 0.87s | Worker startup overhead |
+| pytest -n auto (xdist) | 1.90s | Many workers, high overhead |
+| rpytest (default) | 0.25s | Hybrid execution, warm workers |
+| rpytest -n 1 | 0.96s | Sequential mode |
+| rpytest -n 4 | 0.25s | **3.5x faster than xdist** |
+| rpytest -n auto | 0.20s | **9.5x faster than xdist** |
 
-**Key insight:** For this test suite, rpytest's default hybrid execution (warm workers + direct execution) outperforms explicit parallel modes because the warm daemon eliminates startup overhead.
+**Key insight:** For this test suite, rpytest's parallel execution massively outperforms xdist because the warm daemon eliminates worker startup overhead.
 
 ## Detailed Results
 
@@ -39,19 +39,31 @@ rpytest provides built-in `-n` support compatible with pytest-xdist, but without
 
 | Configuration | Run 1 | Run 2 | Run 3 | Average |
 |---------------|-------|-------|-------|---------|
-| pytest | 0.56s | 0.48s | 0.48s | 0.51s |
-| pytest -n 4 | 1.32s | 1.18s | 1.19s | 1.23s |
-| pytest -n auto | 2.79s | 2.95s | 3.44s | 3.06s |
-| rpytest | 0.41s | 0.67s | 0.37s | 0.48s |
-| rpytest -n 1 | 1.58s | 1.49s | 1.41s | 1.49s |
-| rpytest -n 4 | 1.15s | 0.78s | 1.04s | 0.99s |
-| rpytest -n auto | 1.12s | 1.18s | 1.06s | 1.12s |
+| pytest | 0.31s | 0.30s | 0.30s | 0.30s |
+| pytest -n 4 | 0.89s | 0.86s | 0.87s | 0.87s |
+| pytest -n auto | 1.89s | 1.93s | 1.87s | 1.90s |
+| rpytest | 0.26s | 0.23s | 0.26s | 0.25s |
+| rpytest -n 1 | 0.96s | 1.07s | 1.04s | 1.02s |
+| rpytest -n 4 | 0.25s | 0.37s | 0.33s | 0.32s |
+| rpytest -n auto | 0.20s | 0.31s | 0.29s | 0.27s |
+
+### Wall Clock Time (including startup)
+
+| Configuration | Average |
+|---------------|---------|
+| pytest | 0.63s |
+| pytest -n 4 | 1.25s |
+| pytest -n auto | 2.26s |
+| rpytest | 0.32s |
+| rpytest -n 1 | 1.05s |
+| rpytest -n 4 | 0.35s |
+| rpytest -n auto | 0.30s |
 
 ### Memory Usage
 
 | Component | pytest | rpytest |
 |-----------|--------|---------|
-| CLI process | 35.8 MB | 6.2 MB |
+| CLI process | 39.4 MB | 5.9 MB |
 | Daemon (shared) | N/A | ~80 MB |
 
 The rpytest daemon is a shared process that serves multiple CLI invocations.
@@ -61,8 +73,8 @@ The CLI itself is a lightweight Rust binary.
 
 | Metric | pytest | rpytest |
 |--------|--------|---------|
-| Tests/second | 941 | 1,000 |
-| ms/test | 1.06 | 1.00 |
+| Tests/second | 1,667 | 2,000 |
+| ms/test | 0.60 | 0.50 |
 
 ## Why pytest-xdist Can Be Slower
 
@@ -114,13 +126,12 @@ Run these commands to reproduce the benchmarks:
 
 ```bash
 # Setup
-source .venv/bin/activate
-pip install pytest-xdist
+uv pip install pytest-xdist
 
 # pytest benchmarks
-time python -m pytest benchmark_suite/ -q
-time python -m pytest benchmark_suite/ -n 4 -q
-time python -m pytest benchmark_suite/ -n auto -q
+time uv run python -m pytest benchmark_suite/ -q
+time uv run python -m pytest benchmark_suite/ -n 4 -q
+time uv run python -m pytest benchmark_suite/ -n auto -q
 
 # rpytest benchmarks
 time ./target/release/rpytest benchmark_suite/ -q
@@ -129,7 +140,7 @@ time ./target/release/rpytest benchmark_suite/ -n 4 -q
 time ./target/release/rpytest benchmark_suite/ -n auto -q
 
 # Memory comparison
-/usr/bin/time -v python -m pytest benchmark_suite/ -q 2>&1 | grep "Maximum resident"
+/usr/bin/time -v uv run python -m pytest benchmark_suite/ -q 2>&1 | grep "Maximum resident"
 /usr/bin/time -v ./target/release/rpytest benchmark_suite/ -q 2>&1 | grep "Maximum resident"
 
 # Drop-in compatibility verification
@@ -138,7 +149,7 @@ time ./target/release/rpytest benchmark_suite/ -n auto -q
 
 ## Test Suite Composition
 
-The `benchmark_suite/` contains 480 tests across 10 test files:
+The `benchmark_suite/` contains 500 tests across 30 test files:
 - Simple assertion tests
 - Parameterized tests (10 params each)
 - Tests with fixtures

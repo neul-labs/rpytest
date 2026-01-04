@@ -307,8 +307,10 @@ impl LifecycleManager {
             return result;
         }
 
-        // TODO: Actually ping the daemon via socket
-        // For now, assume healthy if process and socket exist
+        // Note: A full socket-based ping is available via rpytest_ipc::is_daemon_running()
+        // which uses async IPC. For this sync health check, we rely on process + socket file
+        // checks which are sufficient for most cases. The async client should be used when
+        // actual daemon responsiveness verification is needed (e.g., before running tests).
 
         let result = HealthCheckResult {
             healthy: true,
@@ -332,8 +334,9 @@ impl LifecycleManager {
             .context("Could not find Python executable")?;
 
         // Spawn daemon process
+        let socket_path = self.config.socket_path.to_string_lossy();
         let child = Command::new(&python)
-            .args(["-m", "rpytest_daemon", "--socket", self.config.socket_path.to_str().unwrap()])
+            .args(["-m", "rpytest_daemon", "--socket", socket_path.as_ref()])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -352,9 +355,19 @@ impl LifecycleManager {
     }
 
     fn read_pid(&self) -> Option<u32> {
-        fs::read_to_string(&self.config.pid_file)
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
+        match fs::read_to_string(&self.config.pid_file) {
+            Ok(content) => match content.trim().parse() {
+                Ok(pid) => Some(pid),
+                Err(e) => {
+                    debug!("Failed to parse PID from '{}': {}", content.trim(), e);
+                    None
+                }
+            },
+            Err(e) => {
+                debug!("Failed to read PID file {:?}: {}", self.config.pid_file, e);
+                None
+            }
+        }
     }
 
     fn write_pid(&self, pid: u32) -> Result<()> {

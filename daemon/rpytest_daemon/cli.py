@@ -20,6 +20,12 @@ def main():
         help=f"Socket path (default: {get_default_socket_path()})",
     )
     parser.add_argument(
+        "--idle-timeout",
+        type=int,
+        default=0,
+        help="Idle timeout in seconds (0 = no timeout, default: 0)",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="count",
@@ -53,7 +59,7 @@ def main():
         socket_path = f"ipc://{socket_path}"
 
     try:
-        run_daemon(socket_path)
+        run_daemon(socket_path, idle_timeout=args.idle_timeout)
     except KeyboardInterrupt:
         print("\nInterrupted", file=sys.stderr)
         sys.exit(130)

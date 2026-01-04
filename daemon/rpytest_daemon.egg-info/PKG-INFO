@@ -11,3 +11,4 @@ Requires-Dist: pytest>=7.0.0
 Provides-Extra: dev
 Requires-Dist: pytest; extra == "dev"
 Requires-Dist: pytest-asyncio; extra == "dev"
+Requires-Dist: mypy; extra == "dev"

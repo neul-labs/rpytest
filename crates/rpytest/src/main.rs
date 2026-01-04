@@ -1,6 +1,6 @@
 //! rpytest - Rust-powered, drop-in replacement for pytest.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use rpytest_core::protocol::{Request, Response};
 use tracing::{debug, info};
@@ -43,7 +43,10 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env()
-                .add_directive(log_level.parse().unwrap()),
+                .add_directive(log_level.parse().unwrap_or_else(|_| {
+                    // Fallback to info level if parsing fails (shouldn't happen with static strings)
+                    tracing_subscriber::filter::Directive::from(tracing::Level::INFO)
+                })),
         )
         .with_target(false)
         .init();
@@ -60,9 +63,10 @@ async fn async_main(cli: Cli) -> Result<()> {
     debug!("rpytest starting");
 
     // Load configuration
-    let root = cli.rootdir.clone().unwrap_or_else(|| {
-        std::env::current_dir().expect("Failed to get current directory")
-    });
+    let root = match cli.rootdir.clone() {
+        Some(dir) => dir,
+        None => std::env::current_dir().context("Failed to get current directory")?,
+    };
 
     let config = config::load_config(&root)?;
 
@@ -70,6 +74,10 @@ async fn async_main(cli: Cli) -> Result<()> {
     let effective_cli = cli.merge_with_config(&config);
 
     // Handle special commands
+    if effective_cli.daemon {
+        return handle_daemon_mode(&effective_cli).await;
+    }
+
     if effective_cli.daemon_status {
         return handle_daemon_status(&effective_cli).await;
     }
@@ -569,6 +577,107 @@ async fn handle_run(cli: &Cli, root: &std::path::Path) -> Result<()> {
 
     manager.disconnect().await?;
     Ok(())
+}
+
+async fn handle_daemon_mode(cli: &Cli) -> Result<()> {
+    use std::process::{Command, Stdio};
+
+    let output = Output::new(cli.verbose, cli.quiet);
+    output.header("rpytest daemon");
+
+    // Find Python interpreter (same logic as DaemonManager)
+    let python = find_python()?;
+    debug!("Using Python: {}", python.display());
+
+    // Get socket path
+    let socket_path = rpytest_ipc::default_socket_path();
+    let socket_path_str = socket_path.to_string_lossy();
+
+    output.info(&format!("Socket: {}", socket_path_str));
+    output.info(&format!("Idle timeout: {}s", cli.daemon_idle_timeout));
+
+    // Build args
+    let mut args = vec![
+        "-m".to_string(),
+        "rpytest_daemon.cli".to_string(),
+        "--socket".to_string(),
+        socket_path_str.to_string(),
+    ];
+
+    // Add idle timeout
+    if cli.daemon_idle_timeout > 0 {
+        args.push("--idle-timeout".to_string());
+        args.push(cli.daemon_idle_timeout.to_string());
+    }
+
+    // Add verbosity
+    if cli.verbose >= 2 {
+        args.push("-vv".to_string());
+    } else if cli.verbose >= 1 {
+        args.push("-v".to_string());
+    }
+
+    output.info("Starting daemon...");
+
+    // Run in foreground (blocking)
+    let status = Command::new(&python)
+        .args(&args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("Failed to run daemon")?;
+
+    if !status.success() {
+        if let Some(code) = status.code() {
+            std::process::exit(code);
+        }
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+/// Find Python interpreter (shared logic).
+fn find_python() -> Result<std::path::PathBuf> {
+    use std::path::PathBuf;
+
+    // Check VIRTUAL_ENV
+    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+        let python = PathBuf::from(venv).join("bin/python");
+        if python.exists() {
+            return Ok(python);
+        }
+    }
+
+    // Check PYTHON env var
+    if let Ok(python) = std::env::var("PYTHON") {
+        let path = PathBuf::from(&python);
+        if path.exists() || which::which(&python).is_ok() {
+            return Ok(path);
+        }
+    }
+
+    // Look for .venv in current directory and parents
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut dir = Some(cwd.as_path());
+        while let Some(d) = dir {
+            let venv_python = d.join(".venv/bin/python");
+            if venv_python.exists() {
+                return Ok(venv_python);
+            }
+            dir = d.parent();
+        }
+    }
+
+    // Try system Python
+    for name in &["python3", "python"] {
+        if let Ok(path) = which::which(name) {
+            return Ok(path);
+        }
+    }
+
+    anyhow::bail!("Could not find Python interpreter. Please ensure Python 3.9+ is installed.")
 }
 
 async fn handle_daemon_status(cli: &Cli) -> Result<()> {

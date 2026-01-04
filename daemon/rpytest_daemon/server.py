@@ -51,15 +51,33 @@ def get_default_socket_path() -> str:
 class DaemonServer:
     """NNG-based RPC server for rpytest."""
 
-    def __init__(self, socket_path: Optional[str] = None):
+    def __init__(self, socket_path: Optional[str] = None, idle_timeout: int = 0):
         self.socket_path = socket_path or get_default_socket_path()
+        self.idle_timeout = idle_timeout  # 0 = no timeout
         self.registry = ContextRegistry()
         self.running = False
         self._socket: Optional[pynng.Rep0] = None
+        self._last_activity = time.time()
+
+    def _update_activity(self):
+        """Update the last activity timestamp."""
+        self._last_activity = time.time()
+
+    def _check_idle_timeout(self) -> bool:
+        """Check if idle timeout has been exceeded. Returns True if should stop."""
+        if self.idle_timeout <= 0:
+            return False
+        idle_time = time.time() - self._last_activity
+        if idle_time >= self.idle_timeout:
+            logger.info(f"Idle timeout reached ({self.idle_timeout}s), shutting down")
+            return True
+        return False
 
     def start(self):
         """Start the daemon server."""
         logger.info(f"Starting daemon at {self.socket_path}")
+        if self.idle_timeout > 0:
+            logger.info(f"Idle timeout: {self.idle_timeout}s")
 
         # Clean up stale socket file if it exists
         socket_file = self.socket_path.replace("ipc://", "")
@@ -75,6 +93,7 @@ class DaemonServer:
         self._socket.recv_timeout = 1000  # 1 second timeout for checking shutdown
 
         self.running = True
+        self._update_activity()
         logger.info("Daemon started, waiting for connections")
 
         # Main loop
@@ -82,10 +101,13 @@ class DaemonServer:
             try:
                 # Receive request with length prefix
                 data = self._socket.recv()
+                self._update_activity()
                 response = self._handle_request(data)
                 self._socket.send(response)
             except pynng.Timeout:
-                # Timeout is expected, continue loop
+                # Timeout is expected - check idle timeout
+                if self._check_idle_timeout():
+                    break
                 continue
             except pynng.Closed:
                 logger.info("Socket closed")
@@ -886,15 +908,20 @@ class DaemonServer:
             return self._encode_error(ErrorCode.INTERNAL_ERROR, str(e))
 
 
-def run_daemon(socket_path: Optional[str] = None):
-    """Run the daemon server."""
+def run_daemon(socket_path: Optional[str] = None, idle_timeout: int = 0):
+    """Run the daemon server.
+
+    Args:
+        socket_path: IPC socket path (e.g., "ipc:///tmp/rpytest.sock")
+        idle_timeout: Seconds of inactivity before auto-shutdown (0 = disabled)
+    """
     # Set up logging
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    server = DaemonServer(socket_path)
+    server = DaemonServer(socket_path, idle_timeout=idle_timeout)
 
     # Handle signals
     def signal_handler(signum, frame):

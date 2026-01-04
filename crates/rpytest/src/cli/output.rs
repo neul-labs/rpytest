@@ -183,3 +183,45 @@ impl Output {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_verbosity_normal() {
+        let output = Output::new(0, 0);
+        assert_eq!(output.verbosity(), 0);
+    }
+
+    #[test]
+    fn test_verbosity_verbose() {
+        let output = Output::new(1, 0);
+        assert_eq!(output.verbosity(), 1);
+
+        let output = Output::new(2, 0);
+        assert_eq!(output.verbosity(), 2);
+    }
+
+    #[test]
+    fn test_verbosity_quiet() {
+        let output = Output::new(0, 1);
+        assert_eq!(output.verbosity(), -1);
+
+        let output = Output::new(0, 2);
+        assert_eq!(output.verbosity(), -2);
+    }
+
+    #[test]
+    fn test_verbosity_mixed() {
+        // verbose and quiet cancel out
+        let output = Output::new(2, 1);
+        assert_eq!(output.verbosity(), 1);
+
+        let output = Output::new(1, 2);
+        assert_eq!(output.verbosity(), -1);
+
+        let output = Output::new(3, 3);
+        assert_eq!(output.verbosity(), 0);
+    }
+}

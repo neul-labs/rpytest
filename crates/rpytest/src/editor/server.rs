@@ -73,7 +73,13 @@ impl EditorServer {
 
         info!("Editor server initialized for {}", root_path);
 
-        // TODO: Connect to daemon and collect tests
+        // Note: Full daemon integration requires making this server async.
+        // For now, the editor server provides a stub implementation.
+        // To implement fully:
+        // 1. Use rpytest_ipc::DaemonClient to connect to the daemon
+        // 2. Send Request::ListTests to get available tests
+        // 3. Populate test_cache with results
+        // See main.rs handle_collect_only() for the async pattern.
         let test_count = 0;
 
         JsonRpcResponse::success(
@@ -135,8 +141,13 @@ impl EditorServer {
         // Mark as running
         self.test_statuses.insert(node_id.to_string(), TestStatus::Running);
 
-        // TODO: Actually run the test via daemon
-        // For now, just acknowledge
+        // Note: Full test execution requires async daemon communication.
+        // To implement fully:
+        // 1. Use rpytest_ipc::DaemonClient to connect to the daemon
+        // 2. Send Request::RunTests with the node_id
+        // 3. Stream results back via Response::RunProgress
+        // See main.rs handle_run() for the async pattern.
+        // For now, just acknowledge the request
         JsonRpcResponse::success(
             id,
             EditorResponse::RunStarted {
@@ -273,7 +284,16 @@ impl EditorServer {
             let length: usize = header
                 .trim()
                 .strip_prefix("Content-Length:")
-                .and_then(|s| s.trim().parse().ok())
+                .and_then(|s| {
+                    let trimmed = s.trim();
+                    match trimmed.parse() {
+                        Ok(len) => Some(len),
+                        Err(e) => {
+                            debug!("Failed to parse Content-Length '{}': {}", trimmed, e);
+                            None
+                        }
+                    }
+                })
                 .unwrap_or(0);
 
             if length == 0 {

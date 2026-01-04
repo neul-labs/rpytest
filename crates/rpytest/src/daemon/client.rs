@@ -13,6 +13,7 @@ use tracing::{debug, info, warn};
 /// Manages the daemon lifecycle and provides a client connection.
 pub struct DaemonManager {
     socket_path: PathBuf,
+    idle_timeout: u64,
     client: Option<DaemonClient>,
 }
 
@@ -21,6 +22,7 @@ impl DaemonManager {
     pub fn new() -> Self {
         Self {
             socket_path: rpytest_ipc::default_socket_path(),
+            idle_timeout: 300, // Default 5 minute idle timeout
             client: None,
         }
     }
@@ -29,8 +31,15 @@ impl DaemonManager {
     pub fn with_socket_path(socket_path: impl Into<PathBuf>) -> Self {
         Self {
             socket_path: socket_path.into(),
+            idle_timeout: 300,
             client: None,
         }
+    }
+
+    /// Set the idle timeout for auto-spawned daemons.
+    pub fn with_idle_timeout(mut self, timeout: u64) -> Self {
+        self.idle_timeout = timeout;
+        self
     }
 
     /// Get the socket path.
@@ -107,6 +116,7 @@ impl DaemonManager {
         // Build the command to run the daemon
         // Use python -m rpytest_daemon.cli to run the daemon module
         let socket_path_str = self.socket_path.to_string_lossy();
+        let idle_timeout_str = self.idle_timeout.to_string();
 
         let mut cmd = Command::new(&python);
         cmd.args([
@@ -114,6 +124,8 @@ impl DaemonManager {
             "rpytest_daemon.cli",
             "--socket",
             &socket_path_str,
+            "--idle-timeout",
+            &idle_timeout_str,
             "-v",
         ]);
 
@@ -147,19 +159,35 @@ impl DaemonManager {
     /// Find the Python interpreter to use.
     fn find_python(&self) -> Result<PathBuf> {
         // Check common Python paths in order of preference
-        let candidates = [
+        let mut candidates: Vec<Option<PathBuf>> = vec![
             // Virtual environment (if active)
             std::env::var("VIRTUAL_ENV")
                 .ok()
                 .map(|v| PathBuf::from(v).join("bin/python")),
             // Explicit PYTHON environment variable
             std::env::var("PYTHON").ok().map(PathBuf::from),
-            // Common system paths
+        ];
+
+        // Look for .venv in current directory and parent directories
+        if let Ok(cwd) = std::env::current_dir() {
+            let mut dir = Some(cwd.as_path());
+            while let Some(d) = dir {
+                let venv_python = d.join(".venv/bin/python");
+                if venv_python.exists() {
+                    candidates.push(Some(venv_python));
+                    break;
+                }
+                dir = d.parent();
+            }
+        }
+
+        // Common system paths
+        candidates.extend([
             Some(PathBuf::from("python3")),
             Some(PathBuf::from("python")),
             Some(PathBuf::from("/usr/bin/python3")),
             Some(PathBuf::from("/usr/bin/python")),
-        ];
+        ]);
 
         for candidate in candidates.into_iter().flatten() {
             if candidate.exists() || which::which(&candidate).is_ok() {

@@ -209,6 +209,10 @@ pub struct Cli {
     pub fixture_max_age: u32,
 
     // === Phase 7: Daemon Management ===
+    /// Run as daemon (start the Python test execution service).
+    #[arg(long = "daemon")]
+    pub daemon: bool,
+
     /// Show daemon status and health information.
     #[arg(long = "daemon-status")]
     pub daemon_status: bool,
@@ -216,6 +220,10 @@ pub struct Cli {
     /// Stop the running daemon.
     #[arg(long = "daemon-stop")]
     pub daemon_stop: bool,
+
+    /// Daemon idle timeout in seconds (auto-stop after inactivity, 0 = no timeout).
+    #[arg(long = "daemon-idle-timeout", value_name = "SECS", default_value = "300")]
+    pub daemon_idle_timeout: u64,
 
     /// Clean up stale test contexts and caches.
     #[arg(long = "cleanup")]
