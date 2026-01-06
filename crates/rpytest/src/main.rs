@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use rpytest_core::protocol::{Request, Response};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
 mod benchmark;
@@ -18,6 +18,24 @@ mod watch;
 use cli::args::Cli;
 use cli::output::Output;
 use daemon::DaemonManager;
+
+/// Parse worker count from CLI argument, logging a warning on failure.
+fn parse_workers(cli_workers: &Option<String>) -> Option<u32> {
+    match cli_workers {
+        Some(ref w) => match w.parse::<u32>() {
+            Ok(n) if n > 0 => Some(n),
+            Ok(_) => {
+                warn!("Worker count must be positive, using auto");
+                None
+            }
+            Err(_) => {
+                warn!("Invalid worker count '{}', using auto", w);
+                None
+            }
+        },
+        None => None,
+    }
+}
 
 fn main() -> Result<()> {
     // Parse CLI arguments first to get verbosity
@@ -131,13 +149,14 @@ async fn handle_collect_only(cli: &Cli, root: &std::path::Path) -> Result<()> {
 
     let response = client
         .send(&Request::InitContext {
+            protocol_version: rpytest_core::protocol::PROTOCOL_VERSION,
             repo_path,
             python_path: None,
         })
         .await?;
 
     let context_id = match response {
-        Response::ContextReady { context_id, inventory_hash } => {
+        Response::ContextReady { context_id, inventory_hash, .. } => {
             output.info(&format!("Context ready: {} (hash: {})", context_id, inventory_hash));
             context_id
         }
@@ -266,13 +285,14 @@ async fn handle_inventory_status(cli: &Cli, root: &std::path::Path) -> Result<()
 
     let response = client
         .send(&Request::InitContext {
+            protocol_version: rpytest_core::protocol::PROTOCOL_VERSION,
             repo_path,
             python_path: None,
         })
         .await?;
 
     let context_id = match response {
-        Response::ContextReady { context_id, inventory_hash } => {
+        Response::ContextReady { context_id, inventory_hash, .. } => {
             output.info(&format!("Context ready: {} (hash: {})", context_id, inventory_hash));
             context_id
         }
@@ -403,13 +423,14 @@ async fn handle_run(cli: &Cli, root: &std::path::Path) -> Result<()> {
 
     let response = client
         .send(&Request::InitContext {
+            protocol_version: rpytest_core::protocol::PROTOCOL_VERSION,
             repo_path,
             python_path: None,
         })
         .await?;
 
     let (context_id, inventory_hash) = match response {
-        Response::ContextReady { context_id, inventory_hash } => {
+        Response::ContextReady { context_id, inventory_hash, .. } => {
             debug!("Context ready: {} (hash: {})", context_id, inventory_hash);
             (context_id, inventory_hash)
         }
@@ -543,7 +564,7 @@ async fn handle_run(cli: &Cli, root: &std::path::Path) -> Result<()> {
         .send(&Request::Run {
             context_id,
             node_ids,
-            workers: cli.workers.as_ref().and_then(|w| w.parse().ok()),
+            workers: parse_workers(&cli.workers),
             maxfail: cli.maxfail,
         })
         .await?;
@@ -836,6 +857,7 @@ async fn handle_watch(cli: &Cli, root: &std::path::Path) -> Result<()> {
     let repo_path = root.to_string_lossy().to_string();
     let response = client
         .send(&Request::InitContext {
+            protocol_version: rpytest_core::protocol::PROTOCOL_VERSION,
             repo_path: repo_path.clone(),
             python_path: None,
         })
@@ -890,7 +912,7 @@ async fn handle_watch(cli: &Cli, root: &std::path::Path) -> Result<()> {
             .send(&Request::Run {
                 context_id: context_id.clone(),
                 node_ids: initial_tests,
-                workers: cli.workers.as_ref().and_then(|w| w.parse().ok()),
+                workers: parse_workers(&cli.workers),
                 maxfail: cli.maxfail,
             })
             .await?;
@@ -1016,7 +1038,7 @@ async fn handle_watch(cli: &Cli, root: &std::path::Path) -> Result<()> {
             .send(&Request::Run {
                 context_id: context_id.clone(),
                 node_ids: tests_to_run,
-                workers: cli.workers.as_ref().and_then(|w| w.parse().ok()),
+                workers: parse_workers(&cli.workers),
                 maxfail: cli.maxfail,
             })
             .await?;

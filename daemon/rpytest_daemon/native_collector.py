@@ -117,7 +117,8 @@ class NativeCollector:
                         return False
 
             return True
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Cache validation failed (will rebuild): {e}")
             return False
 
     def _load_cache(self) -> bool:

@@ -14,6 +14,7 @@ import pynng
 from .context import ContextRegistry
 from .protocol import (
     ErrorCode,
+    PROTOCOL_VERSION,
     collection_complete,
     config_ack,
     context_ready,
@@ -120,8 +121,9 @@ class DaemonServer:
                         str(e),
                     )
                     self._socket.send(err_response)
-                except Exception:
-                    pass
+                except Exception as inner:
+                    # Log the secondary exception - don't silently swallow it
+                    logger.error(f"Failed to send error response: {inner}")
 
         self._cleanup()
 
@@ -216,8 +218,22 @@ class DaemonServer:
 
     def _handle_init_context(self, request: dict) -> bytes:
         """Handle InitContext request."""
+        protocol_version = request.get("protocol_version")
         repo_path = request.get("repo_path")
         python_path = request.get("python_path")
+
+        # Check protocol version
+        if protocol_version is None:
+            return self._encode_error(
+                ErrorCode.INVALID_REQUEST,
+                "Missing protocol_version",
+            )
+
+        if protocol_version != PROTOCOL_VERSION:
+            return self._encode_error(
+                ErrorCode.VERSION_MISMATCH,
+                f"Protocol version mismatch: CLI={protocol_version}, Daemon={PROTOCOL_VERSION}",
+            )
 
         if not repo_path:
             return self._encode_error(

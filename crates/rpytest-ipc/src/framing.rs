@@ -76,11 +76,12 @@ pub fn parse_frame_header(data: &[u8]) -> Result<(usize, usize), FramingError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rpytest_core::protocol::{Request, Response};
+    use rpytest_core::protocol::{Request, Response, PROTOCOL_VERSION};
 
     #[test]
     fn encode_decode_roundtrip() {
         let request = Request::InitContext {
+            protocol_version: PROTOCOL_VERSION,
             repo_path: "/path/to/repo".to_string(),
             python_path: Some("/usr/bin/python3".to_string()),
         };
@@ -100,6 +101,7 @@ mod tests {
     #[test]
     fn encode_decode_response() {
         let response = Response::ContextReady {
+            protocol_version: PROTOCOL_VERSION,
             context_id: "ctx-123".to_string(),
             inventory_hash: "abc123".to_string(),
         };

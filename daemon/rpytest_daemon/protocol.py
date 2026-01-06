@@ -6,6 +6,10 @@ from typing import Optional, List, Dict, Any
 import msgpack
 
 
+# Current protocol version. Increment when breaking changes are made.
+PROTOCOL_VERSION = 1
+
+
 class ErrorCode(str, Enum):
     """Error codes for categorizing failures."""
     CONTEXT_NOT_FOUND = "context_not_found"
@@ -14,6 +18,7 @@ class ErrorCode(str, Enum):
     INTERNAL_ERROR = "internal_error"
     TIMEOUT = "timeout"
     PYTHON_NOT_FOUND = "python_not_found"
+    VERSION_MISMATCH = "version_mismatch"
 
 
 class OutcomeStatus(str, Enum):
@@ -58,6 +63,7 @@ def context_ready(context_id: str, inventory_hash: str) -> Dict[str, Any]:
     """Build a ContextReady response."""
     return {
         "type": "context_ready",
+        "protocol_version": PROTOCOL_VERSION,
         "context_id": context_id,
         "inventory_hash": inventory_hash,
     }

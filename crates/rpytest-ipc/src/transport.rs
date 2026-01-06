@@ -193,9 +193,16 @@ impl DaemonClient {
 pub async fn is_daemon_running(path: impl AsRef<Path>) -> bool {
     match DaemonClient::connect(path).await {
         Ok(client) => {
-            let result = client.ping().await.unwrap_or(false);
-            let _ = client.close().await;
-            result
+            let ping_result = client.ping().await;
+            // Log ping failures for debugging but still return false
+            if let Err(ref e) = ping_result {
+                debug!("Ping to daemon failed: {}", e);
+            }
+            let close_result = client.close().await;
+            if let Err(ref e) = close_result {
+                debug!("Failed to close daemon connection: {}", e);
+            }
+            ping_result.unwrap_or(false)
         }
         Err(_) => false,
     }

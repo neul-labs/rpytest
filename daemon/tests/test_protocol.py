@@ -137,9 +137,11 @@ class TestResponseBuilders:
     """Tests for response builder functions."""
 
     def test_context_ready(self):
+        from rpytest_daemon.protocol import PROTOCOL_VERSION
         result = context_ready("ctx-123", "hash-abc")
         assert result == {
             "type": "context_ready",
+            "protocol_version": PROTOCOL_VERSION,
             "context_id": "ctx-123",
             "inventory_hash": "hash-abc",
         }

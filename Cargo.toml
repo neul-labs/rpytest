@@ -4,6 +4,7 @@ members = [
     "crates/rpytest",
     "crates/rpytest-core",
     "crates/rpytest-ipc",
+    "crates/rpytest-daemon",
 ]
 
 [workspace.package]

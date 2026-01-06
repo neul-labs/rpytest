@@ -157,17 +157,31 @@ def execute_tests_inprocess(node_ids: List[str], repo_path: str) -> List[TestRes
 class WarmWorkerPool:
     """Pool of persistent warm workers."""
 
-    def __init__(self, num_workers: int = 0):
+    # Class-level limits for resource protection
+    MAX_QUEUE_SIZE = 1000  # Maximum tasks that can be queued
+    MAX_BATCH_SIZE = 100   # Maximum tests per batch
+    DEFAULT_BATCH_SIZE = 50
+    RESULT_TIMEOUT_SECS = 300  # 5 minute timeout for results
+
+    def __init__(
+        self,
+        num_workers: int = 0,
+        max_queue_size: Optional[int] = None,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+    ):
         if num_workers <= 0:
             num_workers = max(1, multiprocessing.cpu_count())
 
         self.num_workers = num_workers
-        self.task_queue: multiprocessing.Queue = multiprocessing.Queue()
+        self.max_queue_size = max_queue_size or self.MAX_QUEUE_SIZE
+        self.batch_size = min(batch_size, self.MAX_BATCH_SIZE)
+        self.task_queue: multiprocessing.Queue = multiprocessing.Queue(maxsize=self.max_queue_size)
         self.result_queue: multiprocessing.Queue = multiprocessing.Queue()
         self.workers: List[multiprocessing.Process] = []
         self.ready_events: List[multiprocessing.Event] = []
         self.running = False
         self._batch_counter = 0
+        self._pending_batches: Dict[str, bool] = {}
 
     def start(self):
         """Start all workers."""
@@ -205,6 +219,9 @@ class WarmWorkerPool:
         logger.info("Stopping warm worker pool")
         self.running = False
 
+        # Clear pending batches
+        self._pending_batches.clear()
+
         # Send shutdown signals
         for _ in self.workers:
             self.task_queue.put(None)
@@ -218,15 +235,27 @@ class WarmWorkerPool:
         self.workers.clear()
         self.ready_events.clear()
 
+        # Close queues
+        self.task_queue.close()
+        self.result_queue.close()
+
     def run_tests(
         self,
         node_ids: List[str],
         repo_path: Path,
-        batch_size: int = 50,
+        batch_size: Optional[int] = None,
     ) -> List[TestResult]:
         """Run tests using warm workers.
 
         Tests are distributed across workers in batches.
+
+        Args:
+            node_ids: Test node IDs to execute
+            repo_path: Repository root path
+            batch_size: Override default batch size (capped at MAX_BATCH_SIZE)
+
+        Returns:
+            List of test results
         """
         if not node_ids:
             return []
@@ -234,18 +263,24 @@ class WarmWorkerPool:
         if not self.running:
             self.start()
 
+        # Use instance batch_size as default, allow override
+        effective_batch_size = self.batch_size
+        if batch_size is not None:
+            effective_batch_size = min(batch_size, self.MAX_BATCH_SIZE)
+
         # Split into batches
         batches = [
-            node_ids[i:i + batch_size]
-            for i in range(0, len(node_ids), batch_size)
+            node_ids[i:i + effective_batch_size]
+            for i in range(0, len(node_ids), effective_batch_size)
         ]
 
-        # Submit batches
+        # Submit batches and track pending
         batch_ids = []
         for batch in batches:
             self._batch_counter += 1
             batch_id = f"batch-{self._batch_counter}"
             batch_ids.append(batch_id)
+            self._pending_batches[batch_id] = True
 
             task = TestTask(
                 batch_id=batch_id,
@@ -257,12 +292,24 @@ class WarmWorkerPool:
         # Collect results
         all_results = []
         results_received = 0
+        start_time = time.time()
 
         while results_received < len(batches):
+            # Check for timeout periodically
+            remaining_timeout = self.RESULT_TIMEOUT_SECS - (time.time() - start_time)
+            if remaining_timeout <= 0:
+                logger.warning("Timeout waiting for batch results")
+                break
+
             try:
-                result_data = self.result_queue.get(timeout=300)
+                result_data = self.result_queue.get(timeout=remaining_timeout)
+
                 # Handle both dict and already-parsed results
                 if isinstance(result_data, dict):
+                    batch_id = result_data.get("batch_id")
+                    if batch_id in self._pending_batches:
+                        del self._pending_batches[batch_id]
+
                     results_list = result_data.get("results", [])
                     for r in results_list:
                         if isinstance(r, dict):
@@ -276,6 +323,12 @@ class WarmWorkerPool:
             except queue.Empty:
                 logger.warning("Timeout waiting for batch results")
                 break
+
+        # Clean up any pending batches on timeout
+        if self._pending_batches:
+            pending_count = len(self._pending_batches)
+            logger.warning(f"Cleanup: {pending_count} batches timed out and were discarded")
+            self._pending_batches.clear()
 
         return all_results
 

@@ -1,0 +1,58 @@
+[package]
+name = "rpytest-daemon"
+version = "0.1.0"
+edition = "2021"
+description = "Pure Rust daemon for rpytest - handles test execution, collection, and state management"
+
+[dependencies]
+# Workspace dependencies
+rpytest-core = { path = "../rpytest-core" }
+rpytest-ipc = { path = "../rpytest-ipc" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# IPC - NNG for communication with CLI
+nng = "1.0.1"
+async-nng = "0.2.0"
+
+# Storage
+sled = "0.34"
+
+# Serialization
+rmp-serde = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Python AST parsing (for native test collection)
+rustpython-parser = "0.4.0"
+rustpython-ast = "0.4.0"
+
+# Parallel processing
+rayon = "1"
+
+# Filesystem
+walkdir = "2"
+notify = "7"
+
+# Hashing
+sha256 = "1"
+sha2 = "0.10"
+hex = "0.4"
+
+# Utilities
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+humantime = "2"
+dirs = "5"
+
+# UUID for context IDs
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+assert_matches = "1"

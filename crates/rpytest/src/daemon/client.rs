@@ -56,8 +56,9 @@ impl DaemonManager {
     ///
     /// Returns a mutable reference to the connected client.
     pub async fn connect(&mut self) -> Result<&mut DaemonClient> {
-        if self.client.is_some() {
-            return Ok(self.client.as_mut().unwrap());
+        // If already connected, return the existing client
+        if let Some(ref mut client) = self.client {
+            return Ok(client);
         }
 
         // Try to connect to existing daemon
@@ -65,7 +66,8 @@ impl DaemonManager {
             Ok(client) => {
                 info!("Connected to existing daemon");
                 self.client = Some(client);
-                return Ok(self.client.as_mut().unwrap());
+                // SAFETY: We just set self.client, so this unwrap is safe
+                return Ok(self.client.as_mut().expect("Client should be set after connect"));
             }
             Err(IpcError::DaemonNotRunning(_)) => {
                 debug!("Daemon not running, will attempt to spawn");
@@ -75,25 +77,29 @@ impl DaemonManager {
             }
         }
 
-        // Spawn daemon and retry connection
+        // Spawn daemon and retry connection with exponential backoff
         self.spawn_daemon().await?;
 
-        // Wait for daemon to be ready
+        // Exponential backoff: start at 50ms, double each attempt, max 1s
         let max_retries = 10;
-        let retry_delay = Duration::from_millis(100);
+        let base_delay = Duration::from_millis(50);
+        let max_delay = Duration::from_secs(1);
 
         for i in 0..max_retries {
-            debug!("Connection attempt {} of {}", i + 1, max_retries);
+            // Calculate delay with exponential backoff
+            let delay = std::cmp::min(base_delay * (2_u32.pow(i)), max_delay);
+            debug!("Connection attempt {} of {} (delay: {:?})", i + 1, max_retries, delay);
 
             match DaemonClient::connect(&self.socket_path).await {
                 Ok(client) => {
                     info!("Connected to daemon after spawn");
                     self.client = Some(client);
-                    return Ok(self.client.as_mut().unwrap());
+                    // SAFETY: We just set self.client, so this unwrap is safe
+                    return Ok(self.client.as_mut().expect("Client should be set after connect"));
                 }
                 Err(e) => {
                     debug!("Connection attempt failed: {}", e);
-                    tokio::time::sleep(retry_delay).await;
+                    tokio::time::sleep(delay).await;
                 }
             }
         }

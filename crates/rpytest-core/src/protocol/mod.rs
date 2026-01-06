@@ -4,4 +4,4 @@ mod events;
 mod messages;
 
 pub use events::{LogEvent, Outcome, TestEvent};
-pub use messages::{ErrorCode, Request, Response, TestNodeInfo};
+pub use messages::{ErrorCode, Request, Response, TestNodeInfo, PROTOCOL_VERSION};

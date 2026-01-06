@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Current protocol version. Increment when breaking changes are made.
+pub const PROTOCOL_VERSION: u32 = 1;
+
 /// Test node information returned from daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TestNodeInfo {
@@ -29,6 +32,8 @@ pub struct TestNodeInfo {
 pub enum Request {
     /// Initialize a repository context within the daemon.
     InitContext {
+        /// Protocol version for compatibility checking.
+        protocol_version: u32,
         /// Absolute path to the repository root.
         repo_path: String,
         /// Optional path to Python interpreter.
@@ -223,6 +228,8 @@ pub enum Request {
 pub enum Response {
     /// Context successfully initialized.
     ContextReady {
+        /// Protocol version for compatibility checking.
+        protocol_version: u32,
         /// Unique context identifier.
         context_id: String,
         /// Hash of the current inventory for cache validation.
@@ -490,6 +497,8 @@ pub enum ErrorCode {
     Timeout,
     /// Python interpreter not found or invalid.
     PythonNotFound,
+    /// Protocol version mismatch between CLI and daemon.
+    VersionMismatch,
 }
 
 #[cfg(test)]
@@ -500,6 +509,7 @@ mod tests {
     fn request_roundtrip() {
         let requests = vec![
             Request::InitContext {
+                protocol_version: PROTOCOL_VERSION,
                 repo_path: "/path/to/repo".to_string(),
                 python_path: Some("/usr/bin/python3".to_string()),
             },
@@ -548,6 +558,7 @@ mod tests {
     fn response_roundtrip() {
         let responses = vec![
             Response::ContextReady {
+                protocol_version: PROTOCOL_VERSION,
                 context_id: "ctx-123".to_string(),
                 inventory_hash: "abc123".to_string(),
             },
