@@ -1,35 +1,32 @@
 //! IPC server using NNG for communication with the CLI.
 
 use crate::context::RepoContext;
-use crate::error::{Result, DaemonError};
+use crate::error::{DaemonError, Result};
 use crate::models::{DaemonConfig, TestNode};
 use crate::storage::DaemonStorage;
-use futures::executor::block_on;
+use nng::options::{Options, RecvTimeout};
 use nng::{Message, Protocol, Socket};
-use rmp_serde::{Deserializer, Serializer};
+use rmp_serde::Deserializer;
 use rpytest_core::protocol::{ErrorCode, Request, Response, PROTOCOL_VERSION};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::signal;
-use tokio::sync::{Mutex, Notify};
-use tokio::time::Duration;
-use tracing::{error, info};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use std::thread;
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 /// Type alias for the contexts map
 type ContextMap = Mutex<HashMap<String, RepoContext>>;
 
-/// A streaming test run in progress.
-#[derive(Debug, Clone)]
-pub struct StreamingRun {
-    pub run_id: String,
-    pub context_id: String,
-    pub node_ids: Vec<String>,
-    pub completed: usize,
-    pub total: usize,
-    pub results: Vec<TestNode>,
+struct RequestJob {
+    message: Vec<u8>,
+    responder: oneshot::Sender<Vec<u8>>,
 }
 
 /// Main daemon server.
@@ -61,8 +58,8 @@ impl DaemonServer {
         })
     }
 
-    /// Start the server.
-    pub async fn run(&mut self) -> Result<()> {
+    /// Start the server in a background thread.
+    pub fn run(&mut self) -> Result<()> {
         // Create NNG socket with rep protocol (request-response)
         let socket = Socket::new(Protocol::Rep0)?;
 
@@ -77,130 +74,162 @@ impl DaemonServer {
 
         // Listen on socket
         socket.listen(&self.socket_url)?;
+        socket.set_opt::<RecvTimeout>(Some(Duration::from_millis(100)))?;
 
         info!("Daemon listening on {}", self.socket_url);
 
-        // Handle signals
-        let shutdown = Arc::new(Notify::new());
-        let shutdown_clone = shutdown.clone();
+        // Shared state for shutdown
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = running.clone();
+        let running_for_ctrlc = running.clone();
 
-        // Spawn a task to handle shutdown signal
-        tokio::spawn(async move {
-            let _ = signal::ctrl_c().await;
-            shutdown_clone.notify_one();
+        let storage = self.storage.clone();
+        let runtime_contexts = Arc::clone(&self.contexts);
+        let (request_tx, mut request_rx) = mpsc::unbounded_channel::<RequestJob>();
+
+        // Create a tokio runtime for the server thread
+        let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+
+        // Spawn the processing thread
+        thread::spawn(move || {
+            runtime.block_on(async move {
+                while let Some(job) = request_rx.recv().await {
+                    let response_bytes =
+                        match Self::process_message(job.message, &storage, &runtime_contexts).await
+                        {
+                            Ok(buf) => buf,
+                            Err(e) => {
+                                error!("Processing error: {}", e);
+                                let fallback = Response::Error {
+                                    code: ErrorCode::InternalError,
+                                    message: format!("Daemon error: {}", e),
+                                };
+                                rpytest_ipc::framing::encode(&fallback).unwrap_or_default()
+                            }
+                        };
+
+                    if job.responder.send(response_bytes).is_err() {
+                        debug!("Socket loop dropped before response send");
+                    }
+                }
+            });
         });
 
-        // Use a separate thread for NNG event loop
-        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
-        let socket_url = self.socket_url.clone();
-        let contexts = Arc::clone(&self.contexts);
-        let storage = self.storage.clone();
+        // Spawn socket loop thread to bridge blocking NNG with async runtime
+        let socket_running = running_clone.clone();
+        let socket_tx = request_tx.clone();
+        thread::spawn(move || {
+            let mut socket = socket;
+            while socket_running.load(Ordering::SeqCst) {
+                match socket.recv() {
+                    Ok(msg) => {
+                        let msg_bytes = msg.as_slice().to_vec();
+                        let (resp_tx, resp_rx) = oneshot::channel();
+                        if socket_tx
+                            .send(RequestJob {
+                                message: msg_bytes,
+                                responder: resp_tx,
+                            })
+                            .is_err()
+                        {
+                            error!("Runtime channel closed, stopping socket loop");
+                            break;
+                        }
 
-        // Spawn blocking task for NNG server
-        tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                // Create socket in blocking context
-                let socket = Socket::new(Protocol::Rep0).map_err(DaemonError::from)?;
-
-                // Clean up old socket file if exists
-                if socket_url.starts_with("ipc://") {
-                    let path = &socket_url[4..];
-                    let path = PathBuf::from(path);
-                    if path.exists() {
-                        std::fs::remove_file(&path).map_err(DaemonError::from)?;
-                    }
-                }
-
-                // Listen
-                socket.listen(&socket_url).map_err(DaemonError::from)?;
-                info!("Daemon listening on {}", socket_url);
-
-                // Main loop
-                loop {
-                    // Check for shutdown
-                    if shutdown_rx.recv_timeout(std::time::Duration::from_millis(100)).is_ok() {
-                        break;
-                    }
-
-                    // Try to receive with timeout
-                    match socket.recv() {
-                        Ok(msg) => {
-                            let msg_bytes = msg.as_slice().to_vec();
-                            // Process in a separate blocking task
-                            let result = Self::process_in_blocking(
-                                msg_bytes,
-                                storage.clone(),
-                                contexts.clone(),
-                                socket.clone(),
-                            );
-                            if let Err(e) = result {
-                                error!("Processing error: {}", e);
+                        match resp_rx.blocking_recv() {
+                            Ok(response_buf) => {
+                                if response_buf.is_empty() {
+                                    continue;
+                                }
+                                if let Err((_, e)) =
+                                    socket.send(Message::from(response_buf.as_slice()))
+                                {
+                                    error!("Failed to send response: {}", e);
+                                    break;
+                                }
+                            }
+                            Err(_) => {
+                                error!("Failed to receive daemon response");
+                                break;
                             }
                         }
-                        Err(nng::Error::TimedOut) | Err(nng::Error::TryAgain) => {
-                            // Timeout or would block, continue
-                            continue;
-                        }
-                        Err(e) => {
-                            error!("Receive error: {}", e);
-                        }
+                    }
+                    Err(nng::Error::TimedOut) | Err(nng::Error::TryAgain) => continue,
+                    Err(e) => {
+                        error!("Receive error: {}", e);
+                        thread::sleep(Duration::from_millis(100));
                     }
                 }
-                Ok::<(), DaemonError>(())
-            }).await;
-
-            if let Err(e) = result {
-                error!("Server error: {}", e);
             }
         });
 
-        // Wait for shutdown signal
-        shutdown.notified().await;
-        let _ = shutdown_tx.send(());
+        // Wait for Ctrl+C or signal
+        if let Err(e) = ctrlc::set_handler(move || {
+            running_for_ctrlc.store(false, Ordering::SeqCst);
+        }) {
+            error!("Failed to set Ctrl+C handler: {}", e);
+        }
 
+        // Wait while running
+        while running.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        drop(request_tx);
+        info!("Daemon shutting down");
         Ok(())
     }
 
-    /// Process a message in a blocking context.
-    fn process_in_blocking(
+    /// Process a single message.
+    async fn process_message(
         msg_bytes: Vec<u8>,
-        storage: DaemonStorage,
-        contexts: Arc<ContextMap>,
-        socket: Socket,
-    ) -> Result<()> {
+        storage: &DaemonStorage,
+        contexts: &Arc<ContextMap>,
+    ) -> Result<Vec<u8>> {
+        // Parse length-prefixed framing
+        if msg_bytes.len() < 4 {
+            return Err(DaemonError::Other(
+                "Message too short for length prefix".to_string(),
+            ));
+        }
+
+        let len =
+            u32::from_le_bytes([msg_bytes[0], msg_bytes[1], msg_bytes[2], msg_bytes[3]]) as usize;
+
+        if msg_bytes.len() < 4 + len {
+            return Err(DaemonError::Other(format!(
+                "Message incomplete: expected {} bytes, got {}",
+                4 + len,
+                msg_bytes.len()
+            )));
+        }
+
+        let payload = &msg_bytes[4..4 + len];
+
         // Deserialize request
-        let mut deserializer = Deserializer::new(&msg_bytes[..]);
+        let mut deserializer = Deserializer::new(payload);
         let request: Request = Deserialize::deserialize(&mut deserializer)?;
 
         // Process request
-        let response = futures::executor::block_on(async {
-            Self::process_request(request, &storage, &contexts).await
-        });
+        let response = Self::process_request(request, storage, contexts).await;
 
-        // Serialize response
-        let mut response_buf = Vec::new();
-        response.serialize(&mut Serializer::new(&mut response_buf))?;
+        // Serialize response with length-prefixed framing
+        let response_buf = rpytest_ipc::framing::encode(&response)?;
 
-        // Send response - convert Vec<u8> to Message using from_slice
-        let response_msg = nng::Message::from(response_buf.as_slice());
-        if let Err((_, e)) = socket.send(response_msg) {
-            return Err(DaemonError::Nng(e));
-        }
-
-        Ok(())
+        Ok(response_buf)
     }
 
     /// Process a single request.
     async fn process_request(
         request: Request,
         storage: &DaemonStorage,
-        contexts: &ContextMap,
+        contexts: &Arc<ContextMap>,
     ) -> Response {
         match request {
             Request::InitContext {
                 protocol_version,
                 repo_path,
-                python_path,
+                python_path: _,
             } => {
                 // Check protocol version
                 if protocol_version != PROTOCOL_VERSION {
@@ -216,25 +245,16 @@ impl DaemonServer {
                 // Generate context ID
                 let context_id = Uuid::new_v4().to_string();
 
-                // Create context
-                let python_path = python_path.map(PathBuf::from);
-                let mut context = RepoContext::new(
+                // Create context (native Rust collector only)
+                let context = RepoContext::new(
                     &context_id,
                     Path::new(&repo_path),
-                    python_path,
+                    None,
                     Some(storage.clone()),
                 );
 
-                // Collect tests
-                if let Err(e) = context.collect(false) {
-                    return Response::Error {
-                        code: ErrorCode::CollectionFailed,
-                        message: format!("Collection failed: {}", e),
-                    };
-                }
-
                 // Store context
-                let mut contexts = contexts.lock().await;
+                let mut contexts = contexts.lock().unwrap();
                 contexts.insert(context_id.clone(), context);
 
                 let inventory_hash = contexts
@@ -250,7 +270,7 @@ impl DaemonServer {
             }
 
             Request::Collect { context_id, force } => {
-                let mut contexts = contexts.lock().await;
+                let mut contexts = contexts.lock().unwrap();
                 if let Some(context) = contexts.get_mut(&context_id) {
                     match context.collect(force) {
                         Ok((count, duration_ms)) => Response::CollectionComplete {
@@ -276,15 +296,18 @@ impl DaemonServer {
                 workers,
                 maxfail,
             } => {
-                let mut contexts = contexts.lock().await;
-                if let Some(context) = contexts.get_mut(&context_id) {
-                    match tokio::time::timeout(
-                        Duration::from_secs(300),
-                        context.run_tests(&node_ids, workers, maxfail),
-                    )
-                    .await
-                    {
-                        Ok(Ok(summary)) => Response::RunComplete {
+                let mut context_opt = {
+                    let mut contexts_lock = contexts.lock().unwrap();
+                    contexts_lock.remove(&context_id)
+                };
+
+                if let Some(mut context) = context_opt.take() {
+                    let run_result = context.run_tests(&node_ids, workers, maxfail).await;
+                    let mut contexts_lock = contexts.lock().unwrap();
+                    contexts_lock.insert(context_id.clone(), context);
+
+                    match run_result {
+                        Ok(summary) => Response::RunComplete {
                             total: summary.total,
                             passed: summary.passed,
                             failed: summary.failed,
@@ -292,13 +315,9 @@ impl DaemonServer {
                             errors: summary.errors,
                             duration_ms: summary.duration_ms,
                         },
-                        Ok(Err(e)) => Response::Error {
+                        Err(e) => Response::Error {
                             code: ErrorCode::InternalError,
                             message: format!("Run failed: {}", e),
-                        },
-                        Err(_) => Response::Error {
-                            code: ErrorCode::Timeout,
-                            message: "Run timed out".to_string(),
                         },
                     }
                 } else {
@@ -314,7 +333,7 @@ impl DaemonServer {
                 keyword,
                 marker,
             } => {
-                let contexts = contexts.lock().await;
+                let contexts = contexts.lock().unwrap();
                 if let Some(context) = contexts.get(&context_id) {
                     let filtered: Vec<TestNode> = if let Some(kw) = keyword {
                         context.filter_by_keyword(&kw)
@@ -336,16 +355,13 @@ impl DaemonServer {
             }
 
             Request::GetInventory { context_id } => {
-                let contexts = contexts.lock().await;
+                let contexts = contexts.lock().unwrap();
                 if let Some(context) = contexts.get(&context_id) {
                     let nodes: Vec<TestNode> = context.get_inventory();
                     Response::InventoryData {
                         hash: context.inventory_hash.clone(),
                         collected_at: context.last_collection_time as u64,
-                        nodes: nodes
-                            .into_iter()
-                            .map(|n| n.into())
-                            .collect(),
+                        nodes: nodes.into_iter().map(|n| n.into()).collect(),
                     }
                 } else {
                     Response::Error {
@@ -358,7 +374,7 @@ impl DaemonServer {
             Request::Ping => Response::Pong,
 
             Request::Shutdown { context_id } => {
-                let mut contexts = contexts.lock().await;
+                let mut contexts = contexts.lock().unwrap();
                 if let Some(id) = context_id {
                     contexts.remove(&id);
                 } else {
@@ -367,15 +383,12 @@ impl DaemonServer {
                 Response::ShutdownAck
             }
 
-            Request::GetWorkerStatus { context_id: _ } => {
-                // Simplified - could return actual worker stats
-                Response::WorkerStatus {
-                    active_workers: 0,
-                    idle_workers: 0,
-                    tests_executed: 0,
-                    avg_test_duration_ms: 0,
-                }
-            }
+            Request::GetWorkerStatus { context_id: _ } => Response::WorkerStatus {
+                active_workers: 0,
+                idle_workers: 0,
+                tests_executed: 0,
+                avg_test_duration_ms: 0,
+            },
 
             Request::ConfigureWorkers {
                 context_id: _,
@@ -401,10 +414,9 @@ impl DaemonServer {
             },
 
             Request::GetFlakinessReport { context_id } => {
-                let contexts = contexts.lock().await;
+                let contexts = contexts.lock().unwrap();
                 if let Some(context) = contexts.get(&context_id) {
                     let _report = context.get_flakiness_report();
-                    // Serialize the report to return as part of response
                     Response::FlakinessReport {
                         flaky_tests: Vec::new(),
                         unstable_tests: Vec::new(),
@@ -430,28 +442,119 @@ impl DaemonServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
-    #[tokio::test]
-    async fn test_init_context() {
+    #[test]
+    fn test_init_context() {
         let dir = TempDir::new().unwrap();
 
         // Create a test file
         let test_file = dir.path().join("test_example.py");
-        fs::write(
-            &test_file,
-            "def test_simple():\n    assert True\n",
-        )
-        .unwrap();
+        fs::write(&test_file, "def test_simple():\n    assert True\n").unwrap();
 
         let socket_path = dir.path().join("test.sock");
         let storage_path = dir.path().join("storage");
 
         let server = DaemonServer::new(socket_path, storage_path).unwrap();
+        assert!(server.contexts.lock().unwrap().is_empty());
+    }
 
-        // The server would need to be run in a task to accept connections
-        // This is just a structural test
-        assert!(server.contexts.lock().await.is_empty());
+    #[test]
+    fn test_run_request_completes() {
+        let dir = TempDir::new().unwrap();
+        let repo_root = dir.path().join("repo");
+        let tests_dir = repo_root.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        fs::write(
+            tests_dir.join("test_sample.py"),
+            "def test_ok():\n    assert True\n",
+        )
+        .unwrap();
+
+        std::env::set_var("RPYTEST_FAKE_PYTEST", "1");
+
+        let storage_path = repo_root.join("storage");
+        let storage = DaemonStorage::open(&storage_path).unwrap();
+        let contexts = Arc::new(Mutex::new(HashMap::new()));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let init_response = DaemonServer::process_request(
+                Request::InitContext {
+                    protocol_version: PROTOCOL_VERSION,
+                    repo_path: repo_root.to_string_lossy().to_string(),
+                    python_path: None,
+                },
+                &storage,
+                &contexts,
+            )
+            .await;
+
+            let context_id = match init_response {
+                Response::ContextReady { context_id, .. } => context_id,
+                other => panic!("Unexpected init response: {:?}", other),
+            };
+
+            let collect_response = DaemonServer::process_request(
+                Request::Collect {
+                    context_id: context_id.clone(),
+                    force: true,
+                },
+                &storage,
+                &contexts,
+            )
+            .await;
+
+            match collect_response {
+                Response::CollectionComplete { node_count, .. } => assert!(node_count > 0),
+                other => panic!("Unexpected collect response: {:?}", other),
+            }
+
+            let inventory_response = DaemonServer::process_request(
+                Request::GetInventory {
+                    context_id: context_id.clone(),
+                },
+                &storage,
+                &contexts,
+            )
+            .await;
+
+            let nodes = match inventory_response {
+                Response::InventoryData { nodes, .. } => nodes,
+                other => panic!("Unexpected inventory response: {:?}", other),
+            };
+            assert!(!nodes.is_empty());
+
+            let node_ids: Vec<String> = nodes.into_iter().map(|node| node.node_id).collect();
+
+            let run_response = DaemonServer::process_request(
+                Request::Run {
+                    context_id: context_id.clone(),
+                    node_ids: node_ids.clone(),
+                    workers: Some(1),
+                    maxfail: None,
+                },
+                &storage,
+                &contexts,
+            )
+            .await;
+
+            match run_response {
+                Response::RunComplete {
+                    total,
+                    failed,
+                    errors,
+                    ..
+                } => {
+                    assert_eq!(total, node_ids.len());
+                    assert_eq!(failed, 0);
+                    assert_eq!(errors, 0);
+                }
+                other => panic!("Unexpected run response: {:?}", other),
+            }
+        });
+
+        std::env::remove_var("RPYTEST_FAKE_PYTEST");
     }
 }

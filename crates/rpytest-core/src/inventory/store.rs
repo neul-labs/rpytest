@@ -164,14 +164,23 @@ impl Inventory {
     pub fn save<S: StorageBackend>(&self, storage: &S, context_id: &str) -> StorageResult<()> {
         // Save each node
         for (node_id, node) in &self.nodes {
-            let key = format!("{}{}:{}", String::from_utf8_lossy(keys::INVENTORY), context_id, node_id);
-            let value = rmp_serde::to_vec(node)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let key = format!(
+                "{}{}:{}",
+                String::from_utf8_lossy(keys::INVENTORY),
+                context_id,
+                node_id
+            );
+            let value =
+                rmp_serde::to_vec(node).map_err(|e| StorageError::Serialization(e.to_string()))?;
             storage.set(key.as_bytes(), &value)?;
         }
 
         // Save metadata
-        let meta_key = format!("{}{}:_meta", String::from_utf8_lossy(keys::CONTEXT), context_id);
+        let meta_key = format!(
+            "{}{}:_meta",
+            String::from_utf8_lossy(keys::CONTEXT),
+            context_id
+        );
         let meta_value = rmp_serde::to_vec(&self.meta)
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
         storage.set(meta_key.as_bytes(), &meta_value)?;
@@ -207,14 +216,22 @@ impl Inventory {
         let mut inventory = Self::new();
 
         // Load metadata
-        let meta_key = format!("{}{}:_meta", String::from_utf8_lossy(keys::CONTEXT), context_id);
+        let meta_key = format!(
+            "{}{}:_meta",
+            String::from_utf8_lossy(keys::CONTEXT),
+            context_id
+        );
         if let Some(meta_bytes) = storage.get(meta_key.as_bytes())? {
             inventory.meta = rmp_serde::from_slice(&meta_bytes)
                 .map_err(|e| StorageError::Serialization(e.to_string()))?;
         }
 
         // Load all nodes for this context
-        let prefix = format!("{}{}:", String::from_utf8_lossy(keys::INVENTORY), context_id);
+        let prefix = format!(
+            "{}{}:",
+            String::from_utf8_lossy(keys::INVENTORY),
+            context_id
+        );
         let entries = storage.scan_prefix(prefix.as_bytes())?;
 
         for (_key, value) in entries {
@@ -230,14 +247,22 @@ impl Inventory {
     /// Clear the inventory for a context from storage.
     pub fn clear_storage<S: StorageBackend>(storage: &S, context_id: &str) -> StorageResult<()> {
         // Delete all nodes
-        let prefix = format!("{}{}:", String::from_utf8_lossy(keys::INVENTORY), context_id);
+        let prefix = format!(
+            "{}{}:",
+            String::from_utf8_lossy(keys::INVENTORY),
+            context_id
+        );
         let entries = storage.scan_prefix(prefix.as_bytes())?;
         for (key, _) in entries {
             storage.delete(&key)?;
         }
 
         // Delete metadata
-        let meta_key = format!("{}{}:_meta", String::from_utf8_lossy(keys::CONTEXT), context_id);
+        let meta_key = format!(
+            "{}{}:_meta",
+            String::from_utf8_lossy(keys::CONTEXT),
+            context_id
+        );
         storage.delete(meta_key.as_bytes())?;
 
         storage.flush()?;

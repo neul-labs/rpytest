@@ -35,7 +35,10 @@ pub enum Outcome {
 impl Outcome {
     /// Returns true if this outcome represents a successful test.
     pub fn is_success(&self) -> bool {
-        matches!(self, Outcome::Passed | Outcome::Skipped { .. } | Outcome::XFail { .. })
+        matches!(
+            self,
+            Outcome::Passed | Outcome::Skipped { .. } | Outcome::XFail { .. }
+        )
     }
 
     /// Returns true if this outcome represents a failure that should be counted.
@@ -149,10 +152,16 @@ mod tests {
         assert!(Outcome::Skipped { reason: None }.is_success());
         assert!(Outcome::XFail { reason: None }.is_success());
 
-        assert!(Outcome::Failed { message: "".to_string() }.is_failure());
+        assert!(Outcome::Failed {
+            message: "".to_string()
+        }
+        .is_failure());
         assert!(Outcome::XPass.is_failure());
 
-        assert!(Outcome::Error { message: "".to_string() }.is_error());
+        assert!(Outcome::Error {
+            message: "".to_string()
+        }
+        .is_error());
     }
 
     #[test]

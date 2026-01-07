@@ -7,30 +7,30 @@
 //! - Test scheduling and execution
 //! - Flakiness tracking and fixture management
 
-pub mod error;
-pub mod models;
-pub mod storage;
 pub mod collector;
-pub mod scheduler;
-pub mod flakiness;
-pub mod fixtures;
 pub mod context;
+pub mod error;
 pub mod executor;
+pub mod fixtures;
+pub mod flakiness;
+pub mod models;
+pub mod scheduler;
 pub mod server;
+pub mod storage;
 
-pub use error::{Result, DaemonError};
-pub use models::{TestNode, TestResult, TestOutcome};
-pub use storage::DaemonStorage;
 pub use collector::NativeCollector;
-pub use scheduler::TestScheduler;
-pub use models::ScheduledTest;
-pub use flakiness::FlakinessTracker;
-pub use models::{FlakinessRecord, FixtureState, FixtureScope};
-pub use fixtures::FixtureManager;
 pub use context::RepoContext;
+pub use error::{DaemonError, Result};
 pub use executor::PythonExecutor;
-pub use server::DaemonServer;
+pub use fixtures::FixtureManager;
+pub use flakiness::FlakinessTracker;
 pub use models::DaemonConfig;
+pub use models::ScheduledTest;
+pub use models::{FixtureScope, FixtureState, FlakinessRecord};
+pub use models::{TestNode, TestOutcome, TestResult};
+pub use scheduler::TestScheduler;
+pub use server::DaemonServer;
+pub use storage::DaemonStorage;
 
 /// Re-export commonly used types
-pub use rpytest_core::protocol::{Request, Response, ErrorCode, TestNodeInfo, PROTOCOL_VERSION};
+pub use rpytest_core::protocol::{ErrorCode, Request, Response, TestNodeInfo, PROTOCOL_VERSION};

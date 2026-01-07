@@ -67,9 +67,7 @@ impl FileWatcher {
         let mut debouncer = new_debouncer(debounce_duration, tx)?;
 
         // Watch the root directory recursively
-        debouncer
-            .watcher()
-            .watch(&root, RecursiveMode::Recursive)?;
+        debouncer.watcher().watch(&root, RecursiveMode::Recursive)?;
 
         info!("Started watching {} for changes", root.display());
 
@@ -185,10 +183,7 @@ impl FileWatcher {
     fn is_relevant_file(&self, path: &Path) -> bool {
         let Some(ext) = path.extension() else {
             // Check for files without extension (like conftest)
-            return path
-                .file_name()
-                .map(|n| n == "conftest")
-                .unwrap_or(false);
+            return path.file_name().map(|n| n == "conftest").unwrap_or(false);
         };
 
         ext == "py"

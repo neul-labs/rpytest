@@ -46,7 +46,6 @@ pub enum IpcError {
 /// Client for communicating with the rpytest daemon.
 pub struct DaemonClient {
     socket: Socket,
-    address: String,
 }
 
 impl DaemonClient {
@@ -96,7 +95,7 @@ impl DaemonClient {
 
         debug!("Connected to daemon");
 
-        Ok(Self { socket, address })
+        Ok(Self { socket })
     }
 
     /// Send a request and wait for a response.
@@ -108,30 +107,29 @@ impl DaemonClient {
         // Clone socket for the blocking task
         let socket = self.socket.clone();
 
-        let response_bytes =
-            tokio::task::spawn_blocking(move || -> Result<Vec<u8>, IpcError> {
-                // Send the frame
-                socket
-                    .send(&frame)
-                    .map_err(|(_, e)| IpcError::SendFailed(format!("Send failed: {}", e)))?;
+        let response_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, IpcError> {
+            // Send the frame
+            socket
+                .send(&frame)
+                .map_err(|(_, e)| IpcError::SendFailed(format!("Send failed: {}", e)))?;
 
-                debug!("Sent request, waiting for response");
+            debug!("Sent request, waiting for response");
 
-                // Receive response
-                let msg = socket.recv().map_err(|e| {
-                    if matches!(e, nng::Error::Closed | nng::Error::ConnectionReset) {
-                        IpcError::ConnectionClosed
-                    } else if matches!(e, nng::Error::TimedOut) {
-                        IpcError::Timeout(Duration::from_secs(30))
-                    } else {
-                        IpcError::ReceiveFailed(format!("Receive failed: {}", e))
-                    }
-                })?;
+            // Receive response
+            let msg = socket.recv().map_err(|e| {
+                if matches!(e, nng::Error::Closed | nng::Error::ConnectionReset) {
+                    IpcError::ConnectionClosed
+                } else if matches!(e, nng::Error::TimedOut) {
+                    IpcError::Timeout(Duration::from_secs(30))
+                } else {
+                    IpcError::ReceiveFailed(format!("Receive failed: {}", e))
+                }
+            })?;
 
-                Ok(msg.to_vec())
-            })
-            .await
-            .map_err(|e| IpcError::ReceiveFailed(format!("Task join error: {}", e)))??;
+            Ok(msg.to_vec())
+        })
+        .await
+        .map_err(|e| IpcError::ReceiveFailed(format!("Task join error: {}", e)))??;
 
         // Parse the length-prefixed response
         if response_bytes.len() < 4 {

@@ -1,7 +1,7 @@
 //! Error types for the rpytest daemon.
 
-use thiserror::Error;
 use rpytest_ipc::transport::IpcError;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum DaemonError {
@@ -19,6 +19,9 @@ pub enum DaemonError {
 
     #[error("IPC error: {0}")]
     Ipc(#[from] IpcError),
+
+    #[error("Framing error: {0}")]
+    Framing(#[from] rpytest_ipc::framing::FramingError),
 
     #[error("NNG error: {0}")]
     Nng(#[from] nng::Error),

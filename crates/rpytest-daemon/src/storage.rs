@@ -1,9 +1,8 @@
 //! Storage layer using sled for persistent data.
 
-use crate::error::{Result, DaemonError};
+use crate::error::{DaemonError, Result};
 use crate::models::{
-    TestNode, TestResult, NativeTestNode, FlakinessRecord,
-    FixtureState, FixtureScope, ScheduledTest,
+    FixtureState, FlakinessRecord, NativeTestNode, ScheduledTest, TestNode,
 };
 use rmp_serde::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
@@ -47,9 +46,7 @@ impl std::fmt::Debug for DaemonStorage {
 impl DaemonStorage {
     /// Open or create the storage database.
     pub fn open(storage_path: &PathBuf) -> Result<Self> {
-        let config = sled::Config::default()
-            .path(storage_path)
-            .temporary(false);
+        let config = sled::Config::default().path(storage_path).temporary(false);
 
         let db = config.open()?;
 
@@ -67,7 +64,10 @@ impl DaemonStorage {
         if let Some(version_bytes) = config_tree.get("version")? {
             let version: u32 = rmp_serde::from_slice(&version_bytes)?;
             if version != STORAGE_VERSION {
-                error!("Storage schema version mismatch: expected {}, found {}", STORAGE_VERSION, version);
+                error!(
+                    "Storage schema version mismatch: expected {}, found {}",
+                    STORAGE_VERSION, version
+                );
                 return Err(DaemonError::Other(format!(
                     "Storage schema version mismatch: expected {}, found {}",
                     STORAGE_VERSION, version

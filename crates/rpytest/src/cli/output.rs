@@ -53,11 +53,9 @@ impl Output {
     /// Print a debug message (very verbose only).
     pub fn debug(&self, msg: &str) {
         if self.verbosity() >= 2 {
-            let _ = self.term.write_line(&format!(
-                "{} {}",
-                style("[DEBUG]").dim(),
-                style(msg).dim()
-            ));
+            let _ =
+                self.term
+                    .write_line(&format!("{} {}", style("[DEBUG]").dim(), style(msg).dim()));
         }
     }
 
@@ -87,11 +85,9 @@ impl Output {
     /// Print a test passed indicator.
     pub fn test_passed(&self, node_id: &str) {
         if self.verbosity() >= 1 {
-            let _ = self.term.write_line(&format!(
-                "{} {}",
-                style("PASSED").green(),
-                node_id
-            ));
+            let _ = self
+                .term
+                .write_line(&format!("{} {}", style("PASSED").green(), node_id));
         } else if self.verbosity() >= 0 {
             let _ = self.term.write_str(&style(".").green().to_string());
         }
@@ -100,11 +96,9 @@ impl Output {
     /// Print a test failed indicator.
     pub fn test_failed(&self, node_id: &str) {
         if self.verbosity() >= 1 {
-            let _ = self.term.write_line(&format!(
-                "{} {}",
-                style("FAILED").red(),
-                node_id
-            ));
+            let _ = self
+                .term
+                .write_line(&format!("{} {}", style("FAILED").red(), node_id));
         } else if self.verbosity() >= 0 {
             let _ = self.term.write_str(&style("F").red().to_string());
         }
@@ -113,11 +107,9 @@ impl Output {
     /// Print a test skipped indicator.
     pub fn test_skipped(&self, node_id: &str) {
         if self.verbosity() >= 1 {
-            let _ = self.term.write_line(&format!(
-                "{} {}",
-                style("SKIPPED").yellow(),
-                node_id
-            ));
+            let _ = self
+                .term
+                .write_line(&format!("{} {}", style("SKIPPED").yellow(), node_id));
         } else if self.verbosity() >= 0 {
             let _ = self.term.write_str(&style("s").yellow().to_string());
         }
@@ -126,11 +118,9 @@ impl Output {
     /// Print a test error indicator.
     pub fn test_error(&self, node_id: &str) {
         if self.verbosity() >= 1 {
-            let _ = self.term.write_line(&format!(
-                "{} {}",
-                style("ERROR").red().bold(),
-                node_id
-            ));
+            let _ = self
+                .term
+                .write_line(&format!("{} {}", style("ERROR").red().bold(), node_id));
         } else if self.verbosity() >= 0 {
             let _ = self.term.write_str(&style("E").red().bold().to_string());
         }
@@ -144,7 +134,14 @@ impl Output {
     }
 
     /// Print summary statistics.
-    pub fn summary(&self, passed: usize, failed: usize, skipped: usize, errors: usize, duration_secs: f64) {
+    pub fn summary(
+        &self,
+        passed: usize,
+        failed: usize,
+        skipped: usize,
+        errors: usize,
+        duration_secs: f64,
+    ) {
         if self.verbosity() >= -1 {
             let _ = self.term.write_line("");
 

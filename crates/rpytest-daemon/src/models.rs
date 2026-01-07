@@ -1,6 +1,7 @@
 //! Data models for the rpytest daemon.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::PathBuf;
 
 /// Test outcome types.
@@ -117,7 +118,27 @@ pub struct NativeTestNode {
     pub line_number: u32,
     pub markers: Vec<String>,
     pub is_simple: bool,
-    pub parameters: Vec<String>,
+    pub parameters: Vec<Value>,
+    pub skip: bool,
+    pub skip_reason: Option<String>,
+    pub xfail: bool,
+    pub xfail_reason: Option<String>,
+    pub xfail_strict: bool,
+}
+
+/// Information about a parametrized test variant.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ParameterizedTestNode {
+    /// Parameter names (e.g., ["x", "y"] for "x,y")
+    pub param_names: Vec<String>,
+    /// Parameter values, custom IDs, and per-variant marks for each variant.
+    /// Each tuple is (values, custom_id, marks) where:
+    /// - values: the parameter values
+    /// - custom_id: custom ID from pytest.param(id="...") if provided
+    /// - marks: per-variant marks from pytest.param(marks=...)
+    pub param_values: Vec<(Vec<String>, Option<String>, Vec<String>)>,
+    /// Generated test ID for a specific variant
+    pub test_id: String,
 }
 
 /// Configuration for auto-rerun behavior.
@@ -155,7 +176,7 @@ pub struct RerunResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FlakinessRecord {
     pub node_id: String,
-    pub outcomes: Vec<String>,  // Last N outcomes (stored as strings)
+    pub outcomes: Vec<String>, // Last N outcomes (stored as strings)
     pub consecutive_failures: u32,
     pub consecutive_passes: u32,
     pub flaky_streak: u32,

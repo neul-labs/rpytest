@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Pure Rust daemon for rpytest - handles test execution, collection, and state management"
 
+[[bin]]
+name = "rpytest-daemon"
+path = "src/main.rs"
+
 [dependencies]
 # Workspace dependencies
 rpytest-core = { path = "../rpytest-core" }
@@ -46,9 +50,11 @@ hex = "0.4"
 thiserror = "1"
 anyhow = "1"
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 humantime = "2"
 dirs = "5"
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
 
 # UUID for context IDs
 uuid = { version = "1", features = ["v4"] }

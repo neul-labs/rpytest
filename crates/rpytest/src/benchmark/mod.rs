@@ -3,10 +3,10 @@
 //! Provides infrastructure for comparing rpytest vs pytest performance
 //! across different test suite sizes and characteristics.
 
-mod runner;
 mod report;
+mod runner;
 mod suites;
 
-pub use runner::{BenchmarkRunner, BenchmarkConfig, BenchmarkResult};
-pub use report::{BenchmarkReport, format_report};
-pub use suites::{TestSuite, SuiteGenerator, SuiteSize};
+pub use report::{format_report, BenchmarkReport};
+pub use runner::{BenchmarkConfig, BenchmarkResult, BenchmarkRunner};
+pub use suites::{SuiteGenerator, SuiteSize, TestSuite};

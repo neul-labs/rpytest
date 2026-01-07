@@ -120,7 +120,6 @@ pub enum Request {
     },
 
     // --- Phase 5: Flakiness ---
-
     /// Get flakiness report for all tracked tests.
     GetFlakinessReport {
         /// Context identifier.
@@ -168,7 +167,6 @@ pub enum Request {
     },
 
     // --- Phase 5: Fixtures ---
-
     /// Configure session fixture reuse.
     ConfigureFixtureReuse {
         /// Context identifier.
@@ -194,7 +192,6 @@ pub enum Request {
     },
 
     // --- Phase 5: Sharding ---
-
     /// Get tests for a specific shard.
     GetShard {
         /// Context identifier.
@@ -333,7 +330,6 @@ pub enum Response {
     },
 
     // --- Phase 5: Flakiness Responses ---
-
     /// Flakiness report for tracked tests.
     FlakinessReport {
         /// Tests identified as flaky.
@@ -379,7 +375,6 @@ pub enum Response {
     },
 
     // --- Phase 5: Fixture Responses ---
-
     /// Fixture configuration.
     FixtureConfig {
         /// Whether enabled.
@@ -411,7 +406,6 @@ pub enum Response {
     },
 
     // --- Phase 5: Sharding Responses ---
-
     /// Tests assigned to a shard.
     ShardedTests {
         /// Shard index.
@@ -572,18 +566,16 @@ mod tests {
             Response::InventoryData {
                 hash: "abc123".to_string(),
                 collected_at: 1234567890,
-                nodes: vec![
-                    TestNodeInfo {
-                        node_id: "test.py::test_func".to_string(),
-                        file_path: "test.py".to_string(),
-                        lineno: Some(10),
-                        name: "test_func".to_string(),
-                        class_name: None,
-                        markers: vec!["slow".to_string()],
-                        skip: false,
-                        xfail: false,
-                    },
-                ],
+                nodes: vec![TestNodeInfo {
+                    node_id: "test.py::test_func".to_string(),
+                    file_path: "test.py".to_string(),
+                    lineno: Some(10),
+                    name: "test_func".to_string(),
+                    class_name: None,
+                    markers: vec!["slow".to_string()],
+                    skip: false,
+                    xfail: false,
+                }],
             },
             Response::RunComplete {
                 total: 10,
@@ -605,14 +597,12 @@ mod tests {
                 completed: 5,
                 running: 2,
                 done: false,
-                results: vec![
-                    TestResultInfo {
-                        node_id: "test.py::test_foo".to_string(),
-                        outcome: "passed".to_string(),
-                        duration_ms: 100,
-                        message: None,
-                    },
-                ],
+                results: vec![TestResultInfo {
+                    node_id: "test.py::test_foo".to_string(),
+                    outcome: "passed".to_string(),
+                    duration_ms: 100,
+                    message: None,
+                }],
             },
             Response::Error {
                 code: ErrorCode::ContextNotFound,

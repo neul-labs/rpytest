@@ -80,7 +80,11 @@ impl OutputDiff {
 
     /// Format as a human-readable string.
     pub fn format(&self) -> String {
-        let critical = if self.is_critical() { "[CRITICAL]" } else { "[INFO]" };
+        let critical = if self.is_critical() {
+            "[CRITICAL]"
+        } else {
+            "[INFO]"
+        };
         format!(
             "{} {}: expected '{}', got '{}'\n  {}",
             critical,

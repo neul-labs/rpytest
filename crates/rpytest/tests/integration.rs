@@ -20,8 +20,7 @@ def test_also_pass():
     assert 1 + 1 == 2
 "#;
 
-    fs::write(temp.path().join("test_simple.py"), test_content)
-        .expect("Failed to write test file");
+    fs::write(temp.path().join("test_simple.py"), test_content).expect("Failed to write test file");
 
     temp
 }
@@ -103,13 +102,12 @@ fn test_failed_first_flags() {
 
 // Integration test that requires daemon - marked as ignored by default
 #[test]
-#[ignore = "Requires Python daemon to be running"]
+#[ignore = "Requires daemon to be running"]
 fn test_collect_only_with_daemon() {
     let temp = create_test_project();
 
     let mut cmd = Command::cargo_bin("rpytest").unwrap();
     cmd.args(["--collect-only", "--rootdir", temp.path().to_str().unwrap()]);
-    cmd.env("VIRTUAL_ENV", std::env::var("VIRTUAL_ENV").unwrap_or_default());
 
     cmd.assert()
         .success()
@@ -118,13 +116,12 @@ fn test_collect_only_with_daemon() {
 }
 
 #[test]
-#[ignore = "Requires Python daemon to be running"]
+#[ignore = "Requires daemon to be running"]
 fn test_run_with_daemon() {
     let temp = create_test_project();
 
     let mut cmd = Command::cargo_bin("rpytest").unwrap();
     cmd.args(["--rootdir", temp.path().to_str().unwrap()]);
-    cmd.env("VIRTUAL_ENV", std::env::var("VIRTUAL_ENV").unwrap_or_default());
 
     // Output goes to stderr (UI output)
     cmd.assert()

@@ -209,7 +209,7 @@ pub struct Cli {
     pub fixture_max_age: u32,
 
     // === Phase 7: Daemon Management ===
-    /// Run as daemon (start the Python test execution service).
+    /// Run as daemon (start the Rust test execution service).
     #[arg(long = "daemon")]
     pub daemon: bool,
 
@@ -222,8 +222,16 @@ pub struct Cli {
     pub daemon_stop: bool,
 
     /// Daemon idle timeout in seconds (auto-stop after inactivity, 0 = no timeout).
-    #[arg(long = "daemon-idle-timeout", value_name = "SECS", default_value = "300")]
+    #[arg(
+        long = "daemon-idle-timeout",
+        value_name = "SECS",
+        default_value = "300"
+    )]
     pub daemon_idle_timeout: u64,
+
+    /// Override the daemon storage directory.
+    #[arg(long = "daemon-storage", value_name = "DIR")]
+    pub daemon_storage: Option<PathBuf>,
 
     /// Clean up stale test contexts and caches.
     #[arg(long = "cleanup")]
@@ -314,8 +322,7 @@ mod tests {
 
     #[test]
     fn parse_paths() {
-        let cli =
-            Cli::try_parse_from(["rpytest", "tests/", "test_foo.py::test_bar"]).unwrap();
+        let cli = Cli::try_parse_from(["rpytest", "tests/", "test_foo.py::test_bar"]).unwrap();
         assert_eq!(cli.paths, vec!["tests/", "test_foo.py::test_bar"]);
     }
 
@@ -375,15 +382,9 @@ mod tests {
 
     #[test]
     fn parse_passthrough() {
-        let cli = Cli::try_parse_from([
-            "rpytest",
-            "-k",
-            "auth",
-            "--",
-            "--some-plugin-flag",
-            "value",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["rpytest", "-k", "auth", "--", "--some-plugin-flag", "value"])
+                .unwrap();
 
         assert_eq!(cli.keyword, Some("auth".to_string()));
         assert_eq!(cli.passthrough, vec!["--some-plugin-flag", "value"]);
@@ -414,7 +415,10 @@ mod tests {
 
         assert_eq!(
             cli.ignore,
-            vec![PathBuf::from("tests/slow"), PathBuf::from("tests/integration")]
+            vec![
+                PathBuf::from("tests/slow"),
+                PathBuf::from("tests/integration")
+            ]
         );
     }
 
@@ -438,15 +442,156 @@ mod tests {
 
     #[test]
     fn parse_override_ini() {
-        let cli = Cli::try_parse_from([
-            "rpytest",
-            "-o",
-            "addopts=-v",
-            "-o",
-            "testpaths=tests",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["rpytest", "-o", "addopts=-v", "-o", "testpaths=tests"]).unwrap();
 
         assert_eq!(cli.override_ini, vec!["addopts=-v", "testpaths=tests"]);
+    }
+
+    fn next_seed(seed: &mut u64) -> u64 {
+        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        *seed
+    }
+
+    fn maybe_pick(seed: &mut u64, pool: &[&str]) -> Option<String> {
+        let choice = (next_seed(seed) % (pool.len() as u64 + 1)) as usize;
+        if choice == pool.len() {
+            None
+        } else {
+            Some(pool[choice].to_string())
+        }
+    }
+
+    fn random_bool(seed: &mut u64) -> bool {
+        next_seed(seed) & 1 == 1
+    }
+
+    #[test]
+    fn fuzzy_cli_flag_sets() {
+        let keywords = ["auth", "billing", "critical", "slow"];
+        let markers = ["slow", "fast", "db"];
+        let ignore_paths = ["tests/slow", "tests/integration", "tests/api"];
+        let base_paths = ["unit", "integration", "e2e"];
+        let mut seed = 0x1234_5678_9abc_def0;
+
+        for _case in 0..128 {
+            let mut args = Vec::new();
+
+            if let Some(k) = maybe_pick(&mut seed, &keywords) {
+                args.push("-k".into());
+                args.push(k);
+            }
+
+            if let Some(m) = maybe_pick(&mut seed, &markers) {
+                args.push("-m".into());
+                args.push(m);
+            }
+
+            if random_bool(&mut seed) {
+                args.push("-x".into());
+            }
+
+            if random_bool(&mut seed) {
+                let maxfail = (next_seed(&mut seed) % 5) as u32 + 1;
+                args.push("--maxfail".into());
+                args.push(maxfail.to_string());
+            }
+
+            match next_seed(&mut seed) % 3 {
+                0 => {}
+                1 => {
+                    args.push("--workers".into());
+                    args.push(((next_seed(&mut seed) % 4) + 1).to_string());
+                }
+                _ => {
+                    args.push("-n".into());
+                    args.push("auto".into());
+                }
+            }
+
+            if let Some(root) = maybe_pick(&mut seed, &base_paths) {
+                args.push("--rootdir".into());
+                args.push(format!("/tmp/{}", root));
+            }
+
+            if random_bool(&mut seed) {
+                let config_name =
+                    base_paths[(next_seed(&mut seed) % base_paths.len() as u64) as usize];
+                args.push("-c".into());
+                args.push(format!("{}.ini", config_name));
+            }
+
+            if random_bool(&mut seed) {
+                let ignore =
+                    ignore_paths[(next_seed(&mut seed) % ignore_paths.len() as u64) as usize];
+                args.push("--ignore".into());
+                args.push(ignore.into());
+            }
+
+            if random_bool(&mut seed) {
+                let glob_base =
+                    base_paths[(next_seed(&mut seed) % base_paths.len() as u64) as usize];
+                args.push("--ignore-glob".into());
+                args.push(format!("{}*.py", glob_base));
+            }
+
+            if random_bool(&mut seed) {
+                args.push("--junitxml".into());
+                args.push(format!("reports/report_{}.xml", next_seed(&mut seed) % 10));
+            }
+
+            if random_bool(&mut seed) {
+                args.push("--collect-only".into());
+            }
+            if random_bool(&mut seed) {
+                args.push("--lf".into());
+            }
+            if random_bool(&mut seed) {
+                args.push("--ff".into());
+            }
+            if random_bool(&mut seed) {
+                args.push("--nf".into());
+            }
+
+            let verbose = (next_seed(&mut seed) % 3) as usize;
+            for _ in 0..verbose {
+                args.push("-v".into());
+            }
+
+            let quiet = (next_seed(&mut seed) % 3) as usize;
+            for _ in 0..quiet {
+                args.push("-q".into());
+            }
+
+            if random_bool(&mut seed) {
+                args.push("--no-header".into());
+            }
+            if random_bool(&mut seed) {
+                args.push("--showlocals".into());
+            }
+            if random_bool(&mut seed) {
+                args.push("--cleanup".into());
+            }
+            if random_bool(&mut seed) {
+                args.push("--watch".into());
+            }
+            if random_bool(&mut seed) {
+                args.push("--verify-dropin".into());
+            }
+
+            let path_count = (next_seed(&mut seed) % 3) as usize;
+            for _ in 0..path_count {
+                let base = base_paths[(next_seed(&mut seed) % base_paths.len() as u64) as usize];
+                args.push(format!(
+                    "tests/{}_case{}.py",
+                    base,
+                    next_seed(&mut seed) % 50
+                ));
+            }
+
+            let mut argv = vec!["rpytest".to_string()];
+            argv.extend(args);
+            Cli::try_parse_from(argv).expect("fuzzy CLI args should parse");
+        }
     }
 }

@@ -167,10 +167,7 @@ impl BenchmarkRunner {
         let start = Instant::now();
 
         let mut cmd = Command::new(&self.config.python);
-        cmd.arg("-m")
-            .arg("pytest")
-            .arg("-q")
-            .arg("--tb=no");
+        cmd.arg("-m").arg("pytest").arg("-q").arg("--tb=no");
 
         if self.config.collect_only {
             cmd.arg("--collect-only");
@@ -199,8 +196,7 @@ impl BenchmarkRunner {
         let rpytest_bin = find_rpytest_binary()?;
 
         let mut cmd = Command::new(&rpytest_bin);
-        cmd.arg("-q")
-            .arg("--tb=no");
+        cmd.arg("-q").arg("--tb=no");
 
         if self.config.collect_only {
             cmd.arg("--collect-only");
@@ -258,18 +254,12 @@ fn parse_test_count(output: &str) -> usize {
     // Look for "X passed" or "collected X items"
     for line in output.lines() {
         if line.contains("passed") {
-            if let Some(num) = line
-                .split_whitespace()
-                .find(|s| s.parse::<usize>().is_ok())
-            {
+            if let Some(num) = line.split_whitespace().find(|s| s.parse::<usize>().is_ok()) {
                 return num.parse().unwrap_or(0);
             }
         }
         if line.contains("collected") && line.contains("items") {
-            if let Some(num) = line
-                .split_whitespace()
-                .find(|s| s.parse::<usize>().is_ok())
-            {
+            if let Some(num) = line.split_whitespace().find(|s| s.parse::<usize>().is_ok()) {
                 return num.parse().unwrap_or(0);
             }
         }

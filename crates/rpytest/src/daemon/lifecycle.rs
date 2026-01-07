@@ -34,9 +34,11 @@ pub struct LifecycleConfig {
 
 impl Default for LifecycleConfig {
     fn default() -> Self {
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-            .unwrap_or_else(|_| "/tmp".to_string());
-        let runtime_path = PathBuf::from(&runtime_dir);
+        // Try XDG_RUNTIME_DIR first, fall back to temp dir
+        let runtime_path = std::env::var("XDG_RUNTIME_DIR")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
 
         Self {
             socket_path: runtime_path.join("rpytest.sock"),
@@ -120,7 +122,9 @@ impl LifecycleManager {
 
     /// Check if daemon is running.
     pub fn is_running(&self) -> bool {
-        self.read_pid().map(|pid| is_process_alive(pid)).unwrap_or(false)
+        self.read_pid()
+            .map(|pid| is_process_alive(pid))
+            .unwrap_or(false)
     }
 
     /// Get daemon state.
@@ -151,9 +155,7 @@ impl LifecycleManager {
             return None;
         }
 
-        let uptime_secs = self.start_time
-            .map(|t| t.elapsed().as_secs())
-            .unwrap_or(0);
+        let uptime_secs = self.start_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
 
         Some(DaemonInfo {
             pid,
@@ -328,15 +330,13 @@ impl LifecycleManager {
     }
 
     fn spawn_daemon(&self) -> Result<u32> {
-        // Find Python executable
-        let python = which::which("python3")
-            .or_else(|_| which::which("python"))
-            .context("Could not find Python executable")?;
+        // Find the rpytest-daemon binary
+        let daemon_bin = find_daemon_binary()?;
 
         // Spawn daemon process
         let socket_path = self.config.socket_path.to_string_lossy();
-        let child = Command::new(&python)
-            .args(["-m", "rpytest_daemon", "--socket", socket_path.as_ref()])
+        let child = Command::new(&daemon_bin)
+            .args(["--socket", socket_path.as_ref()])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -371,8 +371,8 @@ impl LifecycleManager {
     }
 
     fn write_pid(&self, pid: u32) -> Result<()> {
-        let mut file = fs::File::create(&self.config.pid_file)
-            .context("Failed to create PID file")?;
+        let mut file =
+            fs::File::create(&self.config.pid_file).context("Failed to create PID file")?;
         write!(file, "{}", pid).context("Failed to write PID")?;
         Ok(())
     }
@@ -380,8 +380,7 @@ impl LifecycleManager {
     fn cleanup_stale_files(&self) -> Result<()> {
         // Remove stale socket
         if self.config.socket_path.exists() {
-            fs::remove_file(&self.config.socket_path)
-                .context("Failed to remove stale socket")?;
+            fs::remove_file(&self.config.socket_path).context("Failed to remove stale socket")?;
             debug!("Removed stale socket file");
         }
 
@@ -413,6 +412,38 @@ fn is_process_alive(pid: u32) -> bool {
         // Fallback for non-Unix systems
         false
     }
+}
+
+/// Find the rpytest-daemon binary.
+fn find_daemon_binary() -> Result<std::path::PathBuf> {
+    use std::path::Path;
+
+    // First, try to find it relative to the current executable
+    if let Ok(current_exe) = std::env::current_exe() {
+        let current_dir = current_exe.parent().unwrap_or_else(|| Path::new("."));
+
+        // Check for rpytest-daemon in the same directory
+        let daemon_path = current_dir.join("rpytest-daemon");
+        if daemon_path.exists() {
+            return Ok(daemon_path);
+        }
+    }
+
+    // Try common locations
+    let candidates = [
+        std::path::PathBuf::from("target/debug/rpytest-daemon"),
+        std::path::PathBuf::from("target/release/rpytest-daemon"),
+        std::path::PathBuf::from("/usr/local/bin/rpytest-daemon"),
+        std::path::PathBuf::from("/usr/bin/rpytest-daemon"),
+    ];
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    anyhow::bail!("Could not find rpytest-daemon binary. Please ensure it is built and in PATH.")
 }
 
 /// Stale context cleanup.
@@ -499,7 +530,10 @@ mod tests {
     fn test_lifecycle_config_default() {
         let config = LifecycleConfig::default();
         assert_eq!(config.max_restarts, 3);
-        assert!(config.socket_path.to_string_lossy().contains("rpytest.sock"));
+        assert!(config
+            .socket_path
+            .to_string_lossy()
+            .contains("rpytest.sock"));
     }
 
     #[test]

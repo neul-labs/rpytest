@@ -1,2 +1,0 @@
-[console_scripts]
-rpytest-daemon = rpytest_daemon.cli:main

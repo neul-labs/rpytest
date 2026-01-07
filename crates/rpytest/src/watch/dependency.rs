@@ -73,7 +73,11 @@ impl DependencyGraph {
 
         for path in changed_files {
             // Check if it's a conftest file
-            if path.file_name().map(|n| n == "conftest.py").unwrap_or(false) {
+            if path
+                .file_name()
+                .map(|n| n == "conftest.py")
+                .unwrap_or(false)
+            {
                 if let Some(scope) = self.conftest_scopes.get(path) {
                     // All tests under this directory are affected
                     for (test_file, tests) in &self.test_file_to_tests {
@@ -239,9 +243,18 @@ mod tests {
     #[test]
     fn test_compute_affected_conftest() {
         let mut graph = DependencyGraph::new();
-        graph.add_test("tests/test_foo.py::test_one", Path::new("tests/test_foo.py"));
-        graph.add_test("tests/test_bar.py::test_two", Path::new("tests/test_bar.py"));
-        graph.add_test("other/test_baz.py::test_three", Path::new("other/test_baz.py"));
+        graph.add_test(
+            "tests/test_foo.py::test_one",
+            Path::new("tests/test_foo.py"),
+        );
+        graph.add_test(
+            "tests/test_bar.py::test_two",
+            Path::new("tests/test_bar.py"),
+        );
+        graph.add_test(
+            "other/test_baz.py::test_three",
+            Path::new("other/test_baz.py"),
+        );
 
         graph.add_conftest(Path::new("tests/conftest.py"));
 

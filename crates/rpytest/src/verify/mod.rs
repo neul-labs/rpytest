@@ -2,8 +2,8 @@
 //!
 //! Compares rpytest output against pytest to ensure compatibility.
 
-mod dropin;
 mod diff;
+mod dropin;
 
-pub use dropin::{verify_dropin, VerifyResult, VerifyConfig};
-pub use diff::{OutputDiff, DiffKind};
+pub use diff::{DiffKind, OutputDiff};
+pub use dropin::{verify_dropin, VerifyConfig, VerifyResult};

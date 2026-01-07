@@ -40,30 +40,22 @@ impl EditorServer {
         let id = request.id;
 
         match &request.request {
-            EditorRequest::Initialize { root_path } => {
-                self.handle_initialize(id, root_path)
-            }
+            EditorRequest::Initialize { root_path } => self.handle_initialize(id, root_path),
             EditorRequest::ListTestsInFile { file_path } => {
                 self.handle_list_tests_in_file(id, file_path)
             }
             EditorRequest::GetNearestTest { file_path, line } => {
                 self.handle_get_nearest_test(id, file_path, *line)
             }
-            EditorRequest::RunTest { node_id } => {
-                self.handle_run_test(id, node_id)
-            }
+            EditorRequest::RunTest { node_id } => self.handle_run_test(id, node_id),
             EditorRequest::RunNearestTest { file_path, line } => {
                 self.handle_run_nearest_test(id, file_path, *line)
             }
             EditorRequest::RunTestsInFile { file_path } => {
                 self.handle_run_tests_in_file(id, file_path)
             }
-            EditorRequest::GetTestStatus { node_id } => {
-                self.handle_get_test_status(id, node_id)
-            }
-            EditorRequest::Shutdown => {
-                self.handle_shutdown(id)
-            }
+            EditorRequest::GetTestStatus { node_id } => self.handle_get_test_status(id, node_id),
+            EditorRequest::Shutdown => self.handle_shutdown(id),
         }
     }
 
@@ -97,10 +89,7 @@ impl EditorServer {
         }
 
         // Return cached tests or empty list
-        let tests = self.test_cache
-            .get(file_path)
-            .cloned()
-            .unwrap_or_default();
+        let tests = self.test_cache.get(file_path).cloned().unwrap_or_default();
 
         JsonRpcResponse::success(
             id,
@@ -116,10 +105,7 @@ impl EditorServer {
             return JsonRpcResponse::error(id, ERR_NOT_INITIALIZED, "Server not initialized");
         }
 
-        let tests = self.test_cache
-            .get(file_path)
-            .cloned()
-            .unwrap_or_default();
+        let tests = self.test_cache.get(file_path).cloned().unwrap_or_default();
 
         // Find the test whose line is closest to but not greater than the cursor line
         let nearest = tests
@@ -127,10 +113,7 @@ impl EditorServer {
             .filter(|t| t.line <= line)
             .max_by_key(|t| t.line);
 
-        JsonRpcResponse::success(
-            id,
-            EditorResponse::NearestTest { test: nearest },
-        )
+        JsonRpcResponse::success(id, EditorResponse::NearestTest { test: nearest })
     }
 
     fn handle_run_test(&mut self, id: u64, node_id: &str) -> JsonRpcResponse {
@@ -139,7 +122,8 @@ impl EditorServer {
         }
 
         // Mark as running
-        self.test_statuses.insert(node_id.to_string(), TestStatus::Running);
+        self.test_statuses
+            .insert(node_id.to_string(), TestStatus::Running);
 
         // Note: Full test execution requires async daemon communication.
         // To implement fully:
@@ -161,10 +145,7 @@ impl EditorServer {
             return JsonRpcResponse::error(id, ERR_NOT_INITIALIZED, "Server not initialized");
         }
 
-        let tests = self.test_cache
-            .get(file_path)
-            .cloned()
-            .unwrap_or_default();
+        let tests = self.test_cache.get(file_path).cloned().unwrap_or_default();
 
         let nearest = tests
             .into_iter()
@@ -173,7 +154,8 @@ impl EditorServer {
 
         match nearest {
             Some(test) => {
-                self.test_statuses.insert(test.node_id.clone(), TestStatus::Running);
+                self.test_statuses
+                    .insert(test.node_id.clone(), TestStatus::Running);
                 JsonRpcResponse::success(
                     id,
                     EditorResponse::RunStarted {
@@ -190,10 +172,7 @@ impl EditorServer {
             return JsonRpcResponse::error(id, ERR_NOT_INITIALIZED, "Server not initialized");
         }
 
-        let tests = self.test_cache
-            .get(file_path)
-            .cloned()
-            .unwrap_or_default();
+        let tests = self.test_cache.get(file_path).cloned().unwrap_or_default();
 
         if tests.is_empty() {
             return JsonRpcResponse::error(id, ERR_TEST_NOT_FOUND, "No tests in file");
@@ -202,13 +181,11 @@ impl EditorServer {
         let node_ids: Vec<String> = tests.iter().map(|t| t.node_id.clone()).collect();
 
         for node_id in &node_ids {
-            self.test_statuses.insert(node_id.clone(), TestStatus::Running);
+            self.test_statuses
+                .insert(node_id.clone(), TestStatus::Running);
         }
 
-        JsonRpcResponse::success(
-            id,
-            EditorResponse::RunStarted { node_ids },
-        )
+        JsonRpcResponse::success(id, EditorResponse::RunStarted { node_ids })
     }
 
     fn handle_get_test_status(&self, id: u64, node_id: &str) -> JsonRpcResponse {
@@ -216,7 +193,8 @@ impl EditorServer {
             return JsonRpcResponse::error(id, ERR_NOT_INITIALIZED, "Server not initialized");
         }
 
-        let status = self.test_statuses
+        let status = self
+            .test_statuses
             .get(node_id)
             .cloned()
             .unwrap_or(TestStatus::Unknown);
@@ -317,7 +295,12 @@ impl EditorServer {
 
                     // Send response
                     let response_json = serde_json::to_string(&response)?;
-                    write!(writer, "Content-Length: {}\r\n\r\n{}", response_json.len(), response_json)?;
+                    write!(
+                        writer,
+                        "Content-Length: {}\r\n\r\n{}",
+                        response_json.len(),
+                        response_json
+                    )?;
                     writer.flush()?;
 
                     // Check for shutdown
@@ -329,7 +312,12 @@ impl EditorServer {
                     error!("Failed to parse request: {}", e);
                     let response = JsonRpcResponse::error(0, ERR_PARSE_ERROR, e.to_string());
                     let response_json = serde_json::to_string(&response)?;
-                    write!(writer, "Content-Length: {}\r\n\r\n{}", response_json.len(), response_json)?;
+                    write!(
+                        writer,
+                        "Content-Length: {}\r\n\r\n{}",
+                        response_json.len(),
+                        response_json
+                    )?;
                     writer.flush()?;
                 }
             }

@@ -174,8 +174,8 @@ fn load_ini_config(path: &Path, section: &str) -> Result<Config, ConfigError> {
 
 /// Load configuration from pyproject.toml.
 fn load_pyproject_config(path: &Path) -> Result<Config, ConfigError> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| ConfigError::ReadError(path.to_path_buf(), e))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| ConfigError::ReadError(path.to_path_buf(), e))?;
 
     let toml_value: toml::Value = content
         .parse()
@@ -215,9 +215,8 @@ fn load_pyproject_config(path: &Path) -> Result<Config, ConfigError> {
 fn apply_config_value(config: &mut Config, key: &str, value: &str) {
     match key {
         "addopts" => {
-            config.addopts = shell_words::split(value).unwrap_or_else(|_| {
-                value.split_whitespace().map(String::from).collect()
-            });
+            config.addopts = shell_words::split(value)
+                .unwrap_or_else(|_| value.split_whitespace().map(String::from).collect());
         }
         "testpaths" => {
             config.testpaths = value
@@ -235,22 +234,13 @@ fn apply_config_value(config: &mut Config, key: &str, value: &str) {
                 .collect();
         }
         "python_files" => {
-            config.python_files = value
-                .split_whitespace()
-                .map(String::from)
-                .collect();
+            config.python_files = value.split_whitespace().map(String::from).collect();
         }
         "python_classes" => {
-            config.python_classes = value
-                .split_whitespace()
-                .map(String::from)
-                .collect();
+            config.python_classes = value.split_whitespace().map(String::from).collect();
         }
         "python_functions" => {
-            config.python_functions = value
-                .split_whitespace()
-                .map(String::from)
-                .collect();
+            config.python_functions = value.split_whitespace().map(String::from).collect();
         }
         "minversion" => {
             config.minversion = Some(value.trim().to_string());
@@ -263,10 +253,7 @@ fn apply_config_value(config: &mut Config, key: &str, value: &str) {
                 .collect();
         }
         "norecursedirs" => {
-            config.norecursedirs = value
-                .split_whitespace()
-                .map(String::from)
-                .collect();
+            config.norecursedirs = value.split_whitespace().map(String::from).collect();
         }
         _ => {
             config.extra.insert(key.to_string(), value.to_string());

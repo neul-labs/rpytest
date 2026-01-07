@@ -278,10 +278,7 @@ mod tests {
 
     #[test]
     fn test_node_creation() {
-        let node = TestNode::new(
-            "test_module.py::test_function",
-            "test_module.py",
-        );
+        let node = TestNode::new("test_module.py::test_function", "test_module.py");
 
         assert_eq!(node.name, "test_function");
         assert_eq!(node.class_name, None);
@@ -290,10 +287,7 @@ mod tests {
 
     #[test]
     fn test_method_node() {
-        let node = TestNode::new(
-            "test_module.py::TestClass::test_method",
-            "test_module.py",
-        );
+        let node = TestNode::new("test_module.py::TestClass::test_method", "test_module.py");
 
         assert_eq!(node.name, "test_method");
         assert_eq!(node.class_name, Some("TestClass".to_string()));
@@ -302,10 +296,7 @@ mod tests {
 
     #[test]
     fn test_parametrized_node() {
-        let node = TestNode::new(
-            "test_module.py::test_func[param1-param2]",
-            "test_module.py",
-        );
+        let node = TestNode::new("test_module.py::test_func[param1-param2]", "test_module.py");
 
         assert_eq!(node.name, "test_func");
         assert_eq!(node.class_name, None);

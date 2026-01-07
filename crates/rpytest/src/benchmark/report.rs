@@ -56,8 +56,7 @@ impl BenchmarkReport {
             .iter()
             .filter(|r| r.meets_target(1.0)) // At least as fast as pytest
             .count();
-        self.summary.average_speedup =
-            speedups.iter().sum::<f64>() / speedups.len() as f64;
+        self.summary.average_speedup = speedups.iter().sum::<f64>() / speedups.len() as f64;
         self.summary.min_speedup = speedups
             .iter()
             .cloned()
@@ -68,10 +67,7 @@ impl BenchmarkReport {
             .cloned()
             .max_by(|a, b| a.partial_cmp(b).unwrap())
             .unwrap_or(0.0);
-        self.summary.all_targets_met = self
-            .results
-            .iter()
-            .all(|r| r.meets_target(1.0));
+        self.summary.all_targets_met = self.results.iter().all(|r| r.meets_target(1.0));
     }
 }
 
@@ -79,22 +75,40 @@ impl BenchmarkReport {
 pub fn format_report(report: &BenchmarkReport) -> String {
     let mut output = String::new();
 
-    writeln!(output, "╔══════════════════════════════════════════════════════════════╗").unwrap();
-    writeln!(output, "║                    BENCHMARK REPORT                          ║").unwrap();
-    writeln!(output, "╠══════════════════════════════════════════════════════════════╣").unwrap();
+    writeln!(
+        output,
+        "╔══════════════════════════════════════════════════════════════╗"
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "║                    BENCHMARK REPORT                          ║"
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "╠══════════════════════════════════════════════════════════════╣"
+    )
+    .unwrap();
 
     // Individual results
     for result in &report.results {
         writeln!(output).unwrap();
         writeln!(output, "  {} ({} tests)", result.name, result.suite_size).unwrap();
-        writeln!(output, "  ├─ pytest:  {:.2}ms ± {:.2}ms",
+        writeln!(
+            output,
+            "  ├─ pytest:  {:.2}ms ± {:.2}ms",
             result.pytest_mean.as_secs_f64() * 1000.0,
             result.pytest_stddev.as_secs_f64() * 1000.0
-        ).unwrap();
-        writeln!(output, "  ├─ rpytest: {:.2}ms ± {:.2}ms",
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "  ├─ rpytest: {:.2}ms ± {:.2}ms",
             result.rpytest_mean.as_secs_f64() * 1000.0,
             result.rpytest_stddev.as_secs_f64() * 1000.0
-        ).unwrap();
+        )
+        .unwrap();
 
         let status = if result.speedup >= 2.0 {
             "🚀"
@@ -111,39 +125,90 @@ pub fn format_report(report: &BenchmarkReport) -> String {
 
     // Summary
     writeln!(output).unwrap();
-    writeln!(output, "╠══════════════════════════════════════════════════════════════╣").unwrap();
-    writeln!(output, "║                       SUMMARY                                ║").unwrap();
-    writeln!(output, "╠══════════════════════════════════════════════════════════════╣").unwrap();
+    writeln!(
+        output,
+        "╠══════════════════════════════════════════════════════════════╣"
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "║                       SUMMARY                                ║"
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "╠══════════════════════════════════════════════════════════════╣"
+    )
+    .unwrap();
     writeln!(output).unwrap();
 
-    writeln!(output, "  Total benchmarks:    {}", report.summary.total_benchmarks).unwrap();
-    writeln!(output, "  Passing (≥1.0x):     {}", report.summary.passing_benchmarks).unwrap();
-    writeln!(output, "  Average speedup:     {:.2}x", report.summary.average_speedup).unwrap();
-    writeln!(output, "  Min/Max speedup:     {:.2}x / {:.2}x",
-        report.summary.min_speedup,
-        report.summary.max_speedup
-    ).unwrap();
+    writeln!(
+        output,
+        "  Total benchmarks:    {}",
+        report.summary.total_benchmarks
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "  Passing (≥1.0x):     {}",
+        report.summary.passing_benchmarks
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "  Average speedup:     {:.2}x",
+        report.summary.average_speedup
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "  Min/Max speedup:     {:.2}x / {:.2}x",
+        report.summary.min_speedup, report.summary.max_speedup
+    )
+    .unwrap();
 
     writeln!(output).unwrap();
 
     // Target evaluation
     writeln!(output, "  Targets:").unwrap();
-    let medium_target = report.results.iter()
+    let medium_target = report
+        .results
+        .iter()
         .filter(|r| r.suite_size >= 50 && r.suite_size <= 500)
         .all(|r| r.speedup >= 1.3);
-    let overhead_target = report.results.iter()
+    let overhead_target = report
+        .results
+        .iter()
         .filter(|r| r.suite_size < 50)
         .all(|r| r.speedup >= 3.0);
 
-    writeln!(output, "    Medium suites (≥1.3x): {}",
-        if medium_target { "✅ PASS" } else { "❌ FAIL" }
-    ).unwrap();
-    writeln!(output, "    Overhead-bound (≥3.0x): {}",
-        if overhead_target { "✅ PASS" } else { "❌ FAIL" }
-    ).unwrap();
+    writeln!(
+        output,
+        "    Medium suites (≥1.3x): {}",
+        if medium_target {
+            "✅ PASS"
+        } else {
+            "❌ FAIL"
+        }
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "    Overhead-bound (≥3.0x): {}",
+        if overhead_target {
+            "✅ PASS"
+        } else {
+            "❌ FAIL"
+        }
+    )
+    .unwrap();
 
     writeln!(output).unwrap();
-    writeln!(output, "╚══════════════════════════════════════════════════════════════╝").unwrap();
+    writeln!(
+        output,
+        "╚══════════════════════════════════════════════════════════════╝"
+    )
+    .unwrap();
 
     output
 }
@@ -197,11 +262,17 @@ pub fn format_markdown(report: &BenchmarkReport) -> String {
             result.pytest_mean.as_secs_f64() * 1000.0,
             result.rpytest_mean.as_secs_f64() * 1000.0,
             result.speedup
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     writeln!(output).unwrap();
-    writeln!(output, "**Average speedup: {:.2}x**", report.summary.average_speedup).unwrap();
+    writeln!(
+        output,
+        "**Average speedup: {:.2}x**",
+        report.summary.average_speedup
+    )
+    .unwrap();
 
     output
 }
@@ -239,8 +310,8 @@ mod tests {
     #[test]
     fn test_report_summary() {
         let mut report = BenchmarkReport::new();
-        report.add_result(make_result("small", 10, 200, 100));  // 2x
-        report.add_result(make_result("medium", 100, 1500, 1000));  // 1.5x
+        report.add_result(make_result("small", 10, 200, 100)); // 2x
+        report.add_result(make_result("medium", 100, 1500, 1000)); // 1.5x
 
         assert_eq!(report.summary.total_benchmarks, 2);
         assert_eq!(report.summary.passing_benchmarks, 2);

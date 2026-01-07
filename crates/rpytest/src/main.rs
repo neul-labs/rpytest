@@ -59,13 +59,12 @@ fn main() -> Result<()> {
     };
 
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::from_default_env()
-                .add_directive(log_level.parse().unwrap_or_else(|_| {
-                    // Fallback to info level if parsing fails (shouldn't happen with static strings)
-                    tracing_subscriber::filter::Directive::from(tracing::Level::INFO)
-                })),
-        )
+        .with_env_filter(EnvFilter::from_default_env().add_directive(
+            log_level.parse().unwrap_or_else(|_| {
+                // Fallback to info level if parsing fails (shouldn't happen with static strings)
+                tracing_subscriber::filter::Directive::from(tracing::Level::INFO)
+            }),
+        ))
         .with_target(false)
         .init();
 
@@ -133,6 +132,9 @@ async fn handle_collect_only(cli: &Cli, root: &std::path::Path) -> Result<()> {
 
     // Connect to daemon
     let mut manager = DaemonManager::new();
+    if let Some(storage) = &cli.daemon_storage {
+        manager.set_storage_path(Some(storage.clone()));
+    }
     output.info("Connecting to daemon...");
 
     let client = match manager.connect().await {
@@ -156,16 +158,58 @@ async fn handle_collect_only(cli: &Cli, root: &std::path::Path) -> Result<()> {
         .await?;
 
     let context_id = match response {
-        Response::ContextReady { context_id, inventory_hash, .. } => {
-            output.info(&format!("Context ready: {} (hash: {})", context_id, inventory_hash));
+        Response::ContextReady {
+            context_id,
+            inventory_hash,
+            ..
+        } => {
+            output.info(&format!(
+                "Context ready: {} (hash: {})",
+                context_id, inventory_hash
+            ));
             context_id
         }
         Response::Error { code, message } => {
-            output.error(&format!("Failed to initialize context: {:?} - {}", code, message));
+            output.error(&format!(
+                "Failed to initialize context: {:?} - {}",
+                code, message
+            ));
             anyhow::bail!("Context initialization failed: {}", message);
         }
         _ => {
             output.error("Unexpected response from daemon");
+            anyhow::bail!("Unexpected response");
+        }
+    };
+
+    // Collect tests (force collection for collect-only mode)
+    output.info("Collecting tests...");
+    let collect_response = client
+        .send(&Request::Collect {
+            context_id: context_id.clone(),
+            force: true,
+        })
+        .await?;
+
+    match collect_response {
+        Response::CollectionComplete {
+            node_count,
+            duration_ms,
+        } => {
+            output.info(&format!(
+                "Collected {} tests in {}ms",
+                node_count, duration_ms
+            ));
+        }
+        Response::Error { code, message } => {
+            output.error(&format!(
+                "Failed to collect tests: {:?} - {}",
+                code, message
+            ));
+            anyhow::bail!("Collection failed: {}", message);
+        }
+        _ => {
+            output.error("Unexpected response from daemon during collection");
             anyhow::bail!("Unexpected response");
         }
     };
@@ -181,12 +225,18 @@ async fn handle_collect_only(cli: &Cli, root: &std::path::Path) -> Result<()> {
 
     match response {
         Response::TestList { node_ids } => {
+            debug!("Received TestList with {} node_ids", node_ids.len());
             // Apply path filtering if paths were specified
             let filtered_ids = if cli.paths.is_empty() {
                 node_ids
             } else {
                 filter_by_paths(&node_ids, &cli.paths)
             };
+            debug!(
+                "Filtered to {} tests (paths: {:?})",
+                filtered_ids.len(),
+                cli.paths
+            );
             output.info(&format!("Collected {} tests:", filtered_ids.len()));
             for node_id in &filtered_ids {
                 println!("  {}", node_id);
@@ -237,7 +287,8 @@ async fn handle_verify_dropin(cli: &Cli, root: &std::path::Path) -> Result<()> {
         output.warn(&format!("Found {} differences:", result.diffs.len()));
         for diff in &result.diffs {
             let prefix = if diff.is_critical() { "❌" } else { "⚠️" };
-            println!("  {} {}: {} vs {}",
+            println!(
+                "  {} {}: {} vs {}",
                 prefix,
                 diff.kind.description(),
                 diff.expected,
@@ -269,6 +320,9 @@ async fn handle_inventory_status(cli: &Cli, root: &std::path::Path) -> Result<()
 
     // Connect to daemon
     let mut manager = DaemonManager::new();
+    if let Some(storage) = &cli.daemon_storage {
+        manager.set_storage_path(Some(storage.clone()));
+    }
     output.info("Connecting to daemon...");
 
     let client = match manager.connect().await {
@@ -292,12 +346,22 @@ async fn handle_inventory_status(cli: &Cli, root: &std::path::Path) -> Result<()
         .await?;
 
     let context_id = match response {
-        Response::ContextReady { context_id, inventory_hash, .. } => {
-            output.info(&format!("Context ready: {} (hash: {})", context_id, inventory_hash));
+        Response::ContextReady {
+            context_id,
+            inventory_hash,
+            ..
+        } => {
+            output.info(&format!(
+                "Context ready: {} (hash: {})",
+                context_id, inventory_hash
+            ));
             context_id
         }
         Response::Error { code, message } => {
-            output.error(&format!("Failed to initialize context: {:?} - {}", code, message));
+            output.error(&format!(
+                "Failed to initialize context: {:?} - {}",
+                code, message
+            ));
             anyhow::bail!("Context initialization failed: {}", message);
         }
         _ => {
@@ -308,11 +372,17 @@ async fn handle_inventory_status(cli: &Cli, root: &std::path::Path) -> Result<()
 
     // Get inventory details
     let response = client
-        .send(&Request::GetInventory { context_id: context_id.clone() })
+        .send(&Request::GetInventory {
+            context_id: context_id.clone(),
+        })
         .await?;
 
     match response {
-        Response::InventoryData { hash, collected_at, nodes } => {
+        Response::InventoryData {
+            hash,
+            collected_at,
+            nodes,
+        } => {
             println!();
             println!("Inventory Hash: {}", hash);
             println!("Collected At:   {}", collected_at);
@@ -320,9 +390,13 @@ async fn handle_inventory_status(cli: &Cli, root: &std::path::Path) -> Result<()
             println!();
 
             // Group by file
-            let mut by_file: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
+            let mut by_file: std::collections::HashMap<String, Vec<_>> =
+                std::collections::HashMap::new();
             for node in &nodes {
-                by_file.entry(node.file_path.clone()).or_default().push(node);
+                by_file
+                    .entry(node.file_path.clone())
+                    .or_default()
+                    .push(node);
             }
 
             for (file, file_nodes) in by_file.iter() {
@@ -340,7 +414,10 @@ async fn handle_inventory_status(cli: &Cli, root: &std::path::Path) -> Result<()
             }
         }
         Response::Error { code, message } => {
-            output.error(&format!("Failed to get inventory: {:?} - {}", code, message));
+            output.error(&format!(
+                "Failed to get inventory: {:?} - {}",
+                code, message
+            ));
         }
         _ => {
             output.error("Unexpected response from daemon");
@@ -354,8 +431,8 @@ async fn handle_inventory_status(cli: &Cli, root: &std::path::Path) -> Result<()
 /// Filter node IDs by path patterns specified on command line.
 /// Supports:
 /// - Exact node IDs: "test_file.py::TestClass::test_method"
-/// - File paths: "test_file.py" or "tests/test_file.py"
-/// - Directory paths: "tests/"
+/// - File paths: "test_file.py" or "tests/test_file.py" or "./test_file.py"
+/// - Directory paths: "tests/" or "tests"
 /// - Partial matches: "test_file.py::TestClass" (matches all methods in class)
 fn filter_by_paths(node_ids: &[String], paths: &[String]) -> Vec<String> {
     if paths.is_empty() {
@@ -366,24 +443,44 @@ fn filter_by_paths(node_ids: &[String], paths: &[String]) -> Vec<String> {
         .iter()
         .filter(|node_id| {
             paths.iter().any(|path| {
+                let path = normalize_path(path);
+
                 // Exact match (full node ID specified)
                 if node_id.as_str() == path {
                     return true;
                 }
+
                 // Node ID starts with path (e.g., path="test.py::TestClass" matches "test.py::TestClass::test_method")
-                if node_id.starts_with(path) {
+                if node_id.starts_with(&path) {
                     return true;
                 }
-                // File path match (e.g., path="test_foo.py" matches "test_foo.py::test_bar")
+
+                // File path match - extract file part from node_id
                 if let Some(file_part) = node_id.split("::").next() {
-                    if file_part == path || file_part.ends_with(&format!("/{}", path)) {
+                    let file_part = normalize_path(file_part);
+
+                    // Check if the file part ends with the path (handles relative and absolute paths)
+                    if file_part == path {
                         return true;
                     }
-                    // Directory match
-                    if path.ends_with('/') && file_part.starts_with(path) {
+
+                    // Check if file path ends with the requested path
+                    // This handles: path="test_file.py" matching "/full/path/test_file.py"
+                    if file_part.ends_with(&format!("/{}", path))
+                        || path.ends_with(&format!("/{}", file_part))
+                    {
                         return true;
                     }
-                    // Also check without trailing slash
+
+                    // Check if the path is a directory (with or without trailing slash)
+                    if path.ends_with('/') || path.ends_with("/.") {
+                        let dir_path = path.trim_end_matches('/').trim_end_matches("/.");
+                        if file_part == dir_path || file_part.starts_with(&format!("{}/", dir_path)) {
+                            return true;
+                        }
+                    }
+
+                    // Also check if file part starts with the path (for directory matches without trailing slash)
                     if file_part.starts_with(&format!("{}/", path)) {
                         return true;
                     }
@@ -393,6 +490,23 @@ fn filter_by_paths(node_ids: &[String], paths: &[String]) -> Vec<String> {
         })
         .cloned()
         .collect()
+}
+
+/// Normalize a path by removing leading ./ and trailing slashes
+fn normalize_path(path: &str) -> String {
+    let mut result = path.to_string();
+
+    // Remove leading ./
+    if result.starts_with("./") {
+        result = result[2..].to_string();
+    }
+
+    // Remove all trailing slashes for consistency
+    while result.ends_with('/') && result.len() > 1 {
+        result.pop();
+    }
+
+    result
 }
 
 async fn handle_run(cli: &Cli, root: &std::path::Path) -> Result<()> {
@@ -407,6 +521,9 @@ async fn handle_run(cli: &Cli, root: &std::path::Path) -> Result<()> {
 
     // Connect to daemon
     let mut manager = DaemonManager::new();
+    if let Some(storage) = &cli.daemon_storage {
+        manager.set_storage_path(Some(storage.clone()));
+    }
     info!("Connecting to daemon...");
 
     let client = match manager.connect().await {
@@ -430,13 +547,85 @@ async fn handle_run(cli: &Cli, root: &std::path::Path) -> Result<()> {
         .await?;
 
     let (context_id, inventory_hash) = match response {
-        Response::ContextReady { context_id, inventory_hash, .. } => {
+        Response::ContextReady {
+            context_id,
+            inventory_hash,
+            ..
+        } => {
             debug!("Context ready: {} (hash: {})", context_id, inventory_hash);
             (context_id, inventory_hash)
         }
         Response::Error { code, message } => {
-            output.error(&format!("Failed to initialize context: {:?} - {}", code, message));
+            output.error(&format!(
+                "Failed to initialize context: {:?} - {}",
+                code, message
+            ));
             anyhow::bail!("Context initialization failed: {}", message);
+        }
+        _ => {
+            output.error("Unexpected response from daemon");
+            anyhow::bail!("Unexpected response");
+        }
+    };
+
+    // Collect tests if needed (inventory is empty)
+    debug!("Getting inventory from daemon");
+    let inventory_response = client
+        .send(&Request::GetInventory {
+            context_id: context_id.clone(),
+        })
+        .await?;
+
+    let inventory_hash = match inventory_response {
+        Response::InventoryData {
+            hash,
+            collected_at: _,
+            nodes,
+        } => {
+            if nodes.is_empty() {
+                // No cached inventory - need to collect
+                debug!("Inventory empty, triggering collection");
+                output.info("Collecting tests...");
+
+                let collect_response = client
+                    .send(&Request::Collect {
+                        context_id: context_id.clone(),
+                        force: true,
+                    })
+                    .await?;
+
+                match collect_response {
+                    Response::CollectionComplete {
+                        node_count,
+                        duration_ms,
+                    } => {
+                        debug!("Collected {} tests in {}ms", node_count, duration_ms);
+                        output.info(&format!(
+                            "Collected {} tests in {}ms",
+                            node_count, duration_ms
+                        ));
+                    }
+                    Response::Error { code, message } => {
+                        output.error(&format!(
+                            "Failed to collect tests: {:?} - {}",
+                            code, message
+                        ));
+                        anyhow::bail!("Collection failed: {}", message);
+                    }
+                    _ => {
+                        output.error("Unexpected response from daemon during collection");
+                        anyhow::bail!("Unexpected response");
+                    }
+                }
+            }
+            hash
+        }
+        Response::Error { code, message } => {
+            output.error(&format!(
+                "Failed to get inventory: {:?} - {}",
+                code, message
+            ));
+            anyhow::bail!("GetInventory failed: {}", message);
         }
         _ => {
             output.error("Unexpected response from daemon");
@@ -454,11 +643,7 @@ async fn handle_run(cli: &Cli, root: &std::path::Path) -> Result<()> {
         if cache_valid {
             debug!("Using cached inventory for filtering");
             cache
-                .filter_tests(
-                    &context_id,
-                    cli.keyword.as_deref(),
-                    cli.marker.as_deref(),
-                )
+                .filter_tests(&context_id, cli.keyword.as_deref(), cli.marker.as_deref())
                 .unwrap_or_default()
         } else {
             debug!("Cache miss - fetching inventory from daemon");
@@ -470,7 +655,11 @@ async fn handle_run(cli: &Cli, root: &std::path::Path) -> Result<()> {
                 .await?;
 
             match response {
-                Response::InventoryData { hash, collected_at, nodes } => {
+                Response::InventoryData {
+                    hash,
+                    collected_at,
+                    nodes,
+                } => {
                     // Save to cache
                     if let Err(e) = cache.save_inventory(&context_id, &hash, collected_at, &nodes) {
                         debug!("Failed to save inventory to cache: {}", e);
@@ -484,9 +673,10 @@ async fn handle_run(cli: &Cli, root: &std::path::Path) -> Result<()> {
                                 n.node_id.to_lowercase().contains(&k.to_lowercase())
                                     || n.name.to_lowercase().contains(&k.to_lowercase())
                             });
-                            let marker_match = cli.marker.as_ref().map_or(true, |m| {
-                                n.markers.iter().any(|marker| marker == m)
-                            });
+                            let marker_match = cli
+                                .marker
+                                .as_ref()
+                                .map_or(true, |m| n.markers.iter().any(|marker| marker == m));
                             keyword_match && marker_match
                         })
                         .map(|n| n.node_id.clone())
@@ -494,7 +684,10 @@ async fn handle_run(cli: &Cli, root: &std::path::Path) -> Result<()> {
                     filtered
                 }
                 Response::Error { code, message } => {
-                    output.error(&format!("Failed to get inventory: {:?} - {}", code, message));
+                    output.error(&format!(
+                        "Failed to get inventory: {:?} - {}",
+                        code, message
+                    ));
                     anyhow::bail!("GetInventory failed: {}", message);
                 }
                 _ => {
@@ -606,10 +799,6 @@ async fn handle_daemon_mode(cli: &Cli) -> Result<()> {
     let output = Output::new(cli.verbose, cli.quiet);
     output.header("rpytest daemon");
 
-    // Find Python interpreter (same logic as DaemonManager)
-    let python = find_python()?;
-    debug!("Using Python: {}", python.display());
-
     // Get socket path
     let socket_path = rpytest_ipc::default_socket_path();
     let socket_path_str = socket_path.to_string_lossy();
@@ -617,18 +806,22 @@ async fn handle_daemon_mode(cli: &Cli) -> Result<()> {
     output.info(&format!("Socket: {}", socket_path_str));
     output.info(&format!("Idle timeout: {}s", cli.daemon_idle_timeout));
 
+    // Find the rpytest-daemon binary
+    let daemon_bin = find_daemon_binary()?;
+    debug!("Using daemon binary: {}", daemon_bin.display());
+
     // Build args
-    let mut args = vec![
-        "-m".to_string(),
-        "rpytest_daemon.cli".to_string(),
-        "--socket".to_string(),
-        socket_path_str.to_string(),
-    ];
+    let mut args = vec!["--socket".to_string(), socket_path_str.to_string()];
 
     // Add idle timeout
     if cli.daemon_idle_timeout > 0 {
         args.push("--idle-timeout".to_string());
         args.push(cli.daemon_idle_timeout.to_string());
+    }
+
+    if let Some(storage) = &cli.daemon_storage {
+        args.push("--storage".to_string());
+        args.push(storage.to_string_lossy().to_string());
     }
 
     // Add verbosity
@@ -641,7 +834,7 @@ async fn handle_daemon_mode(cli: &Cli) -> Result<()> {
     output.info("Starting daemon...");
 
     // Run in foreground (blocking)
-    let status = Command::new(&python)
+    let status = Command::new(&daemon_bin)
         .args(&args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -659,50 +852,40 @@ async fn handle_daemon_mode(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-/// Find Python interpreter (shared logic).
-fn find_python() -> Result<std::path::PathBuf> {
-    use std::path::PathBuf;
+/// Find the rpytest-daemon binary.
+fn find_daemon_binary() -> Result<std::path::PathBuf> {
+    use std::path::Path;
 
-    // Check VIRTUAL_ENV
-    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
-        let python = PathBuf::from(venv).join("bin/python");
-        if python.exists() {
-            return Ok(python);
+    // First, try to find it relative to the current executable
+    if let Ok(current_exe) = std::env::current_exe() {
+        let current_dir = current_exe.parent().unwrap_or_else(|| Path::new("."));
+
+        // Check for rpytest-daemon in the same directory
+        let daemon_path = current_dir.join("rpytest-daemon");
+        if daemon_path.exists() {
+            return Ok(daemon_path);
         }
     }
 
-    // Check PYTHON env var
-    if let Ok(python) = std::env::var("PYTHON") {
-        let path = PathBuf::from(&python);
-        if path.exists() || which::which(&python).is_ok() {
-            return Ok(path);
+    // Try common locations
+    let candidates = [
+        std::path::PathBuf::from("target/debug/rpytest-daemon"),
+        std::path::PathBuf::from("target/release/rpytest-daemon"),
+        std::path::PathBuf::from("/usr/local/bin/rpytest-daemon"),
+        std::path::PathBuf::from("/usr/bin/rpytest-daemon"),
+    ];
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return Ok(candidate);
         }
     }
 
-    // Look for .venv in current directory and parents
-    if let Ok(cwd) = std::env::current_dir() {
-        let mut dir = Some(cwd.as_path());
-        while let Some(d) = dir {
-            let venv_python = d.join(".venv/bin/python");
-            if venv_python.exists() {
-                return Ok(venv_python);
-            }
-            dir = d.parent();
-        }
-    }
-
-    // Try system Python
-    for name in &["python3", "python"] {
-        if let Ok(path) = which::which(name) {
-            return Ok(path);
-        }
-    }
-
-    anyhow::bail!("Could not find Python interpreter. Please ensure Python 3.9+ is installed.")
+    anyhow::bail!("Could not find rpytest-daemon binary. Please ensure it is built and in PATH.")
 }
 
 async fn handle_daemon_status(cli: &Cli) -> Result<()> {
-    use daemon::{LifecycleManager, LifecycleConfig, DaemonState};
+    use daemon::{DaemonState, LifecycleConfig, LifecycleManager};
 
     let output = Output::new(cli.verbose, cli.quiet);
     output.header("Daemon Status");
@@ -743,6 +926,9 @@ async fn handle_daemon_status(cli: &Cli) -> Result<()> {
     // Try to ping daemon via IPC if running
     if state == DaemonState::Running {
         let mut daemon_manager = DaemonManager::new();
+        if let Some(storage) = &cli.daemon_storage {
+            daemon_manager.set_storage_path(Some(storage.clone()));
+        }
         if let Ok(client) = daemon_manager.connect().await {
             let response = client.send(&Request::Ping).await;
             if let Ok(Response::Pong) = response {
@@ -756,13 +942,16 @@ async fn handle_daemon_status(cli: &Cli) -> Result<()> {
 }
 
 async fn handle_daemon_stop(cli: &Cli) -> Result<()> {
-    use daemon::{LifecycleManager, LifecycleConfig};
+    use daemon::{LifecycleConfig, LifecycleManager};
 
     let output = Output::new(cli.verbose, cli.quiet);
     output.header("Stopping Daemon");
 
     // First try graceful shutdown via IPC
     let mut daemon_manager = DaemonManager::new();
+    if let Some(storage) = &cli.daemon_storage {
+        daemon_manager.set_storage_path(Some(storage.clone()));
+    }
     if daemon_manager.is_running().await {
         output.info("Sending shutdown request...");
         if let Err(e) = daemon_manager.shutdown_daemon().await {
@@ -811,7 +1000,10 @@ async fn handle_cleanup(cli: &Cli, root: &std::path::Path) -> Result<()> {
     if config.socket_path.exists() {
         if !daemon::LifecycleManager::new(config.clone()).is_running() {
             std::fs::remove_file(&config.socket_path).ok();
-            output.info(&format!("Removed stale socket: {}", config.socket_path.display()));
+            output.info(&format!(
+                "Removed stale socket: {}",
+                config.socket_path.display()
+            ));
         }
     }
 
@@ -826,10 +1018,13 @@ async fn handle_cleanup(cli: &Cli, root: &std::path::Path) -> Result<()> {
 
 async fn handle_watch(cli: &Cli, root: &std::path::Path) -> Result<()> {
     use std::time::Duration;
-    use watch::{FileWatcher, DependencyGraph, WatchEventKind, filter_test_files};
+    use watch::{filter_test_files, DependencyGraph, FileWatcher, WatchEventKind};
 
     let output = Output::new(cli.verbose, cli.quiet);
-    output.header(&format!("rpytest {} [watch mode]", env!("CARGO_PKG_VERSION")));
+    output.header(&format!(
+        "rpytest {} [watch mode]",
+        env!("CARGO_PKG_VERSION")
+    ));
 
     // Initialize file watcher
     let watcher = match FileWatcher::new(root, 200) {
@@ -845,6 +1040,9 @@ async fn handle_watch(cli: &Cli, root: &std::path::Path) -> Result<()> {
 
     // Connect to daemon
     let mut manager = DaemonManager::new();
+    if let Some(storage) = &cli.daemon_storage {
+        manager.set_storage_path(Some(storage.clone()));
+    }
     let client = match manager.connect().await {
         Ok(c) => c,
         Err(e) => {
@@ -866,7 +1064,10 @@ async fn handle_watch(cli: &Cli, root: &std::path::Path) -> Result<()> {
     let context_id = match response {
         Response::ContextReady { context_id, .. } => context_id,
         Response::Error { code, message } => {
-            output.error(&format!("Failed to initialize context: {:?} - {}", code, message));
+            output.error(&format!(
+                "Failed to initialize context: {:?} - {}",
+                code, message
+            ));
             anyhow::bail!("Context initialization failed");
         }
         _ => anyhow::bail!("Unexpected response"),
@@ -917,7 +1118,15 @@ async fn handle_watch(cli: &Cli, root: &std::path::Path) -> Result<()> {
             })
             .await?;
 
-        if let Response::RunComplete { passed, failed, skipped, errors, duration_ms, .. } = response {
+        if let Response::RunComplete {
+            passed,
+            failed,
+            skipped,
+            errors,
+            duration_ms,
+            ..
+        } = response
+        {
             output.summary(passed, failed, skipped, errors, duration_ms as f64 / 1000.0);
         }
     }
@@ -1013,9 +1222,7 @@ async fn handle_watch(cli: &Cli, root: &std::path::Path) -> Result<()> {
 
                         node_ids
                             .into_iter()
-                            .filter(|nid| {
-                                changed_file_names.iter().any(|f| nid.contains(f))
-                            })
+                            .filter(|nid| changed_file_names.iter().any(|f| nid.contains(f)))
                             .collect()
                     }
                     _ => vec![],
@@ -1032,7 +1239,10 @@ async fn handle_watch(cli: &Cli, root: &std::path::Path) -> Result<()> {
             continue;
         }
 
-        output.info(&format!("Running {} affected test(s)...", tests_to_run.len()));
+        output.info(&format!(
+            "Running {} affected test(s)...",
+            tests_to_run.len()
+        ));
 
         let response = client
             .send(&Request::Run {
@@ -1043,11 +1253,154 @@ async fn handle_watch(cli: &Cli, root: &std::path::Path) -> Result<()> {
             })
             .await?;
 
-        if let Response::RunComplete { passed, failed, skipped, errors, duration_ms, .. } = response {
+        if let Response::RunComplete {
+            passed,
+            failed,
+            skipped,
+            errors,
+            duration_ms,
+            ..
+        } = response
+        {
             output.summary(passed, failed, skipped, errors, duration_ms as f64 / 1000.0);
         }
 
         output.newline();
         output.info("Waiting for file changes...");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_path_basic() {
+        assert_eq!(normalize_path("test.py"), "test.py");
+        assert_eq!(normalize_path("./test.py"), "test.py");
+        assert_eq!(normalize_path("tests/"), "tests");
+        assert_eq!(normalize_path("tests//"), "tests");
+        assert_eq!(normalize_path("./tests/"), "tests");
+        assert_eq!(normalize_path("/absolute/path"), "/absolute/path");
+    }
+
+    #[test]
+    fn test_filter_by_paths_empty() {
+        let node_ids = vec![
+            "test_a.py::test_one".to_string(),
+            "test_b.py::test_two".to_string(),
+        ];
+        let result = filter_by_paths(&node_ids, &[]);
+        assert_eq!(result, node_ids);
+    }
+
+    #[test]
+    fn test_filter_by_paths_exact_node_id() {
+        let node_ids = vec![
+            "test_a.py::test_one".to_string(),
+            "test_a.py::test_two".to_string(),
+            "test_b.py::test_three".to_string(),
+        ];
+        let result = filter_by_paths(&node_ids, &["test_a.py::test_one".to_string()]);
+        assert_eq!(result, vec!["test_a.py::test_one"]);
+    }
+
+    #[test]
+    fn test_filter_by_paths_file_name() {
+        let node_ids = vec![
+            "example_tests/test_a.py::test_one".to_string(),
+            "example_tests/test_a.py::test_two".to_string(),
+            "example_tests/test_b.py::test_three".to_string(),
+        ];
+
+        // Filter by file name only
+        let result = filter_by_paths(&node_ids, &["test_a.py".to_string()]);
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&"example_tests/test_a.py::test_one".to_string()));
+        assert!(result.contains(&"example_tests/test_a.py::test_two".to_string()));
+    }
+
+    #[test]
+    fn test_filter_by_paths_with_prefix() {
+        let node_ids = vec![
+            "/full/path/test_a.py::test_one".to_string(),
+            "/full/path/test_a.py::test_two".to_string(),
+            "/full/path/test_b.py::test_three".to_string(),
+        ];
+
+        // Filter by file name only (should match regardless of prefix)
+        let result = filter_by_paths(&node_ids, &["test_a.py".to_string()]);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_by_paths_directory() {
+        let node_ids = vec![
+            "tests/unit/test_a.py::test_one".to_string(),
+            "tests/unit/test_b.py::test_two".to_string(),
+            "tests/integration/test_c.py::test_three".to_string(),
+        ];
+
+        // Filter by directory
+        let result = filter_by_paths(&node_ids, &["tests/unit/".to_string()]);
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&"tests/unit/test_a.py::test_one".to_string()));
+        assert!(result.contains(&"tests/unit/test_b.py::test_two".to_string()));
+    }
+
+    #[test]
+    fn test_filter_by_paths_directory_no_trailing_slash() {
+        let node_ids = vec![
+            "tests/unit/test_a.py::test_one".to_string(),
+            "tests/unit/test_b.py::test_two".to_string(),
+            "tests/integration/test_c.py::test_three".to_string(),
+        ];
+
+        // Filter by directory without trailing slash
+        let result = filter_by_paths(&node_ids, &["tests/unit".to_string()]);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_by_paths_class() {
+        let node_ids = vec![
+            "test_example.py::TestClass::test_one".to_string(),
+            "test_example.py::TestClass::test_two".to_string(),
+            "test_example.py::OtherClass::test_three".to_string(),
+        ];
+
+        // Filter by class
+        let result = filter_by_paths(&node_ids, &["test_example.py::TestClass".to_string()]);
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&"test_example.py::TestClass::test_one".to_string()));
+        assert!(result.contains(&"test_example.py::TestClass::test_two".to_string()));
+    }
+
+    #[test]
+    fn test_filter_by_paths_multiple() {
+        let node_ids = vec![
+            "test_a.py::test_one".to_string(),
+            "test_b.py::test_two".to_string(),
+            "test_c.py::test_three".to_string(),
+        ];
+
+        // Filter by multiple paths
+        let result = filter_by_paths(&node_ids, &["test_a.py".to_string(), "test_c.py".to_string()]);
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&"test_a.py::test_one".to_string()));
+        assert!(result.contains(&"test_c.py::test_three".to_string()));
+    }
+
+    #[test]
+    fn test_filter_by_paths_with_leading_dot_slash() {
+        let node_ids = vec![
+            "./test_a.py::test_one".to_string(),
+            "./test_b.py::test_two".to_string(),
+        ];
+
+        // Filter with ./ prefix
+        let result = filter_by_paths(&node_ids, &["test_a.py".to_string()]);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&"./test_a.py::test_one".to_string()));
     }
 }

@@ -206,7 +206,7 @@ fn run_rpytest(config: &VerifyConfig) -> Result<RunResult> {
     let mut cmd = Command::new(&rpytest_bin);
     cmd.arg("-v")
         .arg("--tb=short")
-        .arg("--no-header")  // Reduce output noise
+        .arg("--no-header") // Reduce output noise
         .args(&config.pytest_args)
         .current_dir(&config.root);
 
@@ -427,8 +427,12 @@ fn extract_test_node_ids(output: &str) -> HashSet<String> {
     for line in output.lines() {
         let line = line.trim();
         // Match lines like "test_foo.py::test_bar PASSED" or similar
-        if line.contains("::") && (line.contains("PASSED") || line.contains("FAILED") ||
-            line.contains("SKIPPED") || line.contains("ERROR")) {
+        if line.contains("::")
+            && (line.contains("PASSED")
+                || line.contains("FAILED")
+                || line.contains("SKIPPED")
+                || line.contains("ERROR"))
+        {
             if let Some(node_id) = line.split_whitespace().next() {
                 if node_id.contains("::") {
                     node_ids.insert(node_id.to_string());
@@ -452,12 +456,10 @@ fn normalize_output(output: &str) -> String {
     static TIMING_RE: OnceLock<regex_lite::Regex> = OnceLock::new();
 
     let ansi_re = ANSI_RE.get_or_init(|| {
-        regex_lite::Regex::new(r"\x1b\[[0-9;]*m")
-            .expect("ANSI regex pattern is valid")
+        regex_lite::Regex::new(r"\x1b\[[0-9;]*m").expect("ANSI regex pattern is valid")
     });
     let timing_re = TIMING_RE.get_or_init(|| {
-        regex_lite::Regex::new(r"in \d+\.\d+s")
-            .expect("Timing regex pattern is valid")
+        regex_lite::Regex::new(r"in \d+\.\d+s").expect("Timing regex pattern is valid")
     });
 
     let mut normalized = output.to_string();
@@ -498,7 +500,10 @@ mod tests {
 
     #[test]
     fn test_extract_number_after() {
-        assert_eq!(extract_number_after("collected 10 items", "collected"), Some(10));
+        assert_eq!(
+            extract_number_after("collected 10 items", "collected"),
+            Some(10)
+        );
         assert_eq!(extract_number_after("no match here", "collected"), None);
     }
 
@@ -519,7 +524,10 @@ mod tests {
     #[test]
     fn test_extract_number_before() {
         assert_eq!(extract_number_before("10 passed", "passed"), Some(10));
-        assert_eq!(extract_number_before("5 failed, 3 skipped", "failed"), Some(5));
+        assert_eq!(
+            extract_number_before("5 failed, 3 skipped", "failed"),
+            Some(5)
+        );
         assert_eq!(extract_number_before("no number here", "passed"), None);
     }
 }

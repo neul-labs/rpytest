@@ -1,26 +1,20 @@
 //! Repository context management - handles inventory, collection, and state.
 
 use crate::collector::NativeCollector;
-use crate::error::{Result, DaemonError};
+use crate::error::Result;
 use crate::executor::{ExecutorConfig, PythonExecutor};
 use crate::fixtures::FixtureManager;
 use crate::flakiness::FlakinessTracker;
-use crate::models::{
-    RunSummary, RerunConfig, TestNode, TestOutcome, TestResult,
-    ShardConfig,
-};
+use crate::models::{RerunConfig, RunSummary, TestNode, TestOutcome, TestResult};
 use crate::scheduler::TestScheduler;
 use crate::storage::DaemonStorage;
-use crate::server::StreamingRun;
-use rpytest_core::protocol::TestNodeInfo;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use uuid::Uuid;
-use sha2::{Digest, Sha256};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Represents a single test node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,8 +62,6 @@ pub struct RepoContext {
     storage: Option<DaemonStorage>,
     /// Use native collection
     use_native: bool,
-    /// Streaming runs
-    streaming_runs: Arc<Mutex<HashMap<String, StreamingRun>>>,
     /// Collection time
     pub last_collection_time: f64,
     /// Total runs
@@ -108,7 +100,6 @@ impl RepoContext {
             rerun_config: RerunConfig::default(),
             storage,
             use_native: true,
-            streaming_runs: Arc::new(Mutex::new(HashMap::new())),
             last_collection_time: 0.0,
             total_runs: 0,
         }
@@ -133,10 +124,8 @@ impl RepoContext {
                     }
                     self.inventory_hash = self.compute_hash();
                     self.last_collection_time = start_secs;
-                    let duration_ms = start_time
-                        .elapsed()
-                        .unwrap_or(Duration::ZERO)
-                        .as_millis() as u64;
+                    let duration_ms =
+                        start_time.elapsed().unwrap_or(Duration::ZERO).as_millis() as u64;
                     return Ok((inventory.len(), duration_ms));
                 }
             }
@@ -157,8 +146,8 @@ impl RepoContext {
                         class_name: test.class_name,
                         line_number: test.line_number,
                         markers: test.markers,
-                        skip: false,
-                        xfail: false,
+                        skip: test.skip,
+                        xfail: test.xfail,
                     },
                 );
             }
@@ -178,10 +167,7 @@ impl RepoContext {
         self.inventory_hash = self.compute_hash();
         self.last_collection_time = start_secs;
 
-        let duration_ms = start_time
-            .elapsed()
-            .unwrap_or(Duration::ZERO)
-            .as_millis() as u64;
+        let duration_ms = start_time.elapsed().unwrap_or(Duration::ZERO).as_millis() as u64;
 
         info!(
             "Collected {} tests in {}ms",
@@ -194,12 +180,7 @@ impl RepoContext {
 
     /// Get all test node IDs.
     pub fn get_node_ids(&self) -> Vec<String> {
-        self.inventory
-            .lock()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect()
+        self.inventory.lock().unwrap().keys().cloned().collect()
     }
 
     /// Get all test nodes.
@@ -225,10 +206,7 @@ impl RepoContext {
             .filter(|node| {
                 node.node_id.contains(keyword)
                     || node.name.contains(keyword)
-                    || node
-                        .markers
-                        .iter()
-                        .any(|m| m.contains(keyword))
+                    || node.markers.iter().any(|m| m.contains(keyword))
             })
             .cloned()
             .collect()
@@ -339,10 +317,7 @@ impl RepoContext {
         // Save state
         self.save_state()?;
 
-        let duration_ms = start_time
-            .elapsed()
-            .unwrap_or(Duration::ZERO)
-            .as_millis() as u64;
+        let duration_ms = start_time.elapsed().unwrap_or(Duration::ZERO).as_millis() as u64;
 
         Ok(RunSummary {
             total: results.len(),
@@ -407,7 +382,10 @@ impl RepoContext {
         })
     }
 
-    fn serialize_flakiness_record(&self, record: &crate::models::FlakinessRecord) -> serde_json::Value {
+    fn serialize_flakiness_record(
+        &self,
+        record: &crate::models::FlakinessRecord,
+    ) -> serde_json::Value {
         serde_json::json!({
             "node_id": record.node_id,
             "failure_rate": record.outcomes.iter().filter(|o| *o == "failed" || *o == "error").count() as f64 / record.outcomes.len() as f64,

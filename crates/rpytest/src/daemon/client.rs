@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 pub struct DaemonManager {
     socket_path: PathBuf,
     idle_timeout: u64,
+    storage_path: Option<PathBuf>,
     client: Option<DaemonClient>,
 }
 
@@ -23,6 +24,7 @@ impl DaemonManager {
         Self {
             socket_path: rpytest_ipc::default_socket_path(),
             idle_timeout: 300, // Default 5 minute idle timeout
+            storage_path: None,
             client: None,
         }
     }
@@ -32,6 +34,7 @@ impl DaemonManager {
         Self {
             socket_path: socket_path.into(),
             idle_timeout: 300,
+            storage_path: None,
             client: None,
         }
     }
@@ -40,6 +43,17 @@ impl DaemonManager {
     pub fn with_idle_timeout(mut self, timeout: u64) -> Self {
         self.idle_timeout = timeout;
         self
+    }
+
+    /// Set the storage path for auto-spawned daemons.
+    pub fn with_storage_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.storage_path = Some(path.into());
+        self
+    }
+
+    /// Override the storage path in-place.
+    pub fn set_storage_path(&mut self, path: Option<PathBuf>) {
+        self.storage_path = path;
     }
 
     /// Get the socket path.
@@ -67,7 +81,10 @@ impl DaemonManager {
                 info!("Connected to existing daemon");
                 self.client = Some(client);
                 // SAFETY: We just set self.client, so this unwrap is safe
-                return Ok(self.client.as_mut().expect("Client should be set after connect"));
+                return Ok(self
+                    .client
+                    .as_mut()
+                    .expect("Client should be set after connect"));
             }
             Err(IpcError::DaemonNotRunning(_)) => {
                 debug!("Daemon not running, will attempt to spawn");
@@ -88,14 +105,22 @@ impl DaemonManager {
         for i in 0..max_retries {
             // Calculate delay with exponential backoff
             let delay = std::cmp::min(base_delay * (2_u32.pow(i)), max_delay);
-            debug!("Connection attempt {} of {} (delay: {:?})", i + 1, max_retries, delay);
+            debug!(
+                "Connection attempt {} of {} (delay: {:?})",
+                i + 1,
+                max_retries,
+                delay
+            );
 
             match DaemonClient::connect(&self.socket_path).await {
                 Ok(client) => {
                     info!("Connected to daemon after spawn");
                     self.client = Some(client);
                     // SAFETY: We just set self.client, so this unwrap is safe
-                    return Ok(self.client.as_mut().expect("Client should be set after connect"));
+                    return Ok(self
+                        .client
+                        .as_mut()
+                        .expect("Client should be set after connect"));
                 }
                 Err(e) => {
                     debug!("Connection attempt failed: {}", e);
@@ -113,27 +138,39 @@ impl DaemonManager {
 
     /// Spawn the daemon process.
     async fn spawn_daemon(&self) -> Result<()> {
-        info!("Spawning daemon...");
+        info!("Spawning Rust daemon...");
 
-        // Find Python interpreter
-        let python = self.find_python()?;
-        debug!("Using Python: {}", python.display());
+        // Find the rpytest-daemon binary
+        let daemon_bin = self.find_daemon_binary()?;
+        debug!("Using daemon binary: {}", daemon_bin.display());
 
         // Build the command to run the daemon
-        // Use python -m rpytest_daemon.cli to run the daemon module
         let socket_path_str = self.socket_path.to_string_lossy();
         let idle_timeout_str = self.idle_timeout.to_string();
 
-        let mut cmd = Command::new(&python);
+        let mut cmd = Command::new(&daemon_bin);
         cmd.args([
-            "-m",
-            "rpytest_daemon.cli",
             "--socket",
             &socket_path_str,
             "--idle-timeout",
             &idle_timeout_str,
             "-v",
         ]);
+        if let Some(storage) = &self.storage_path {
+            cmd.arg("--storage");
+            cmd.arg(storage);
+        }
+
+        // Add PID file path (use same location as LifecycleManager expects)
+        // Try XDG_RUNTIME_DIR first, fall back to temp dir
+        let pid_file_path = std::env::var("XDG_RUNTIME_DIR")
+            .ok()
+            .map(|dir| PathBuf::from(dir).join("rpytest.pid"))
+            .or_else(|| Some(std::env::temp_dir().join("rpytest.pid")));
+        if let Some(ref pid_path) = pid_file_path {
+            cmd.arg("--pid-file");
+            cmd.arg(pid_path);
+        }
 
         // Spawn detached from parent
         cmd.stdin(Stdio::null());
@@ -162,46 +199,63 @@ impl DaemonManager {
         Ok(())
     }
 
-    /// Find the Python interpreter to use.
-    fn find_python(&self) -> Result<PathBuf> {
-        // Check common Python paths in order of preference
-        let mut candidates: Vec<Option<PathBuf>> = vec![
-            // Virtual environment (if active)
-            std::env::var("VIRTUAL_ENV")
-                .ok()
-                .map(|v| PathBuf::from(v).join("bin/python")),
-            // Explicit PYTHON environment variable
-            std::env::var("PYTHON").ok().map(PathBuf::from),
-        ];
+    /// Find the rpytest-daemon binary.
+    fn find_daemon_binary(&self) -> Result<PathBuf> {
+        // First, try to find it relative to the rpytest binary
+        if let Ok(current_exe) = std::env::current_exe() {
+            let current_dir = current_exe.parent().unwrap_or_else(|| Path::new("."));
 
-        // Look for .venv in current directory and parent directories
-        if let Ok(cwd) = std::env::current_dir() {
-            let mut dir = Some(cwd.as_path());
-            while let Some(d) = dir {
-                let venv_python = d.join(".venv/bin/python");
-                if venv_python.exists() {
-                    candidates.push(Some(venv_python));
-                    break;
-                }
-                dir = d.parent();
+            // Check for rpytest-daemon in the same directory
+            let daemon_path = current_dir.join("rpytest-daemon");
+            if daemon_path.exists() {
+                return Ok(daemon_path);
+            }
+
+            // Also check in target/debug or target/release directories
+            let debug_daemon = current_dir.join("rpytest-daemon");
+            if debug_daemon.exists() {
+                return Ok(debug_daemon);
             }
         }
 
-        // Common system paths
-        candidates.extend([
-            Some(PathBuf::from("python3")),
-            Some(PathBuf::from("python")),
-            Some(PathBuf::from("/usr/bin/python3")),
-            Some(PathBuf::from("/usr/bin/python")),
-        ]);
+        // Try using cargo to find the binary (for development)
+        let output = Command::new("cargo")
+            .args(["build", "-p", "rpytest-daemon", "--bin", "rpytest-daemon"])
+            .output();
 
-        for candidate in candidates.into_iter().flatten() {
-            if candidate.exists() || which::which(&candidate).is_ok() {
+        match output {
+            Ok(o) if o.status.success() => {
+                // Try to find the binary in the target directory
+                if let Ok(current_exe) = std::env::current_exe() {
+                    let current_dir = current_exe.parent().unwrap_or_else(|| Path::new("."));
+                    let daemon_path = current_dir.join("rpytest-daemon");
+                    if daemon_path.exists() {
+                        return Ok(daemon_path);
+                    }
+                }
+            }
+            _ => {
+                debug!("Failed to build daemon with cargo, continuing with other methods");
+            }
+        }
+
+        // Fallback: try common locations
+        let candidates = [
+            PathBuf::from("target/debug/rpytest-daemon"),
+            PathBuf::from("target/release/rpytest-daemon"),
+            PathBuf::from("/usr/local/bin/rpytest-daemon"),
+            PathBuf::from("/usr/bin/rpytest-daemon"),
+        ];
+
+        for candidate in candidates {
+            if candidate.exists() {
                 return Ok(candidate);
             }
         }
 
-        anyhow::bail!("Could not find Python interpreter. Please ensure Python 3.9+ is installed.")
+        anyhow::bail!(
+            "Could not find rpytest-daemon binary. Please ensure it is built and in PATH."
+        )
     }
 
     /// Disconnect from the daemon (doesn't stop the daemon).
@@ -230,7 +284,10 @@ impl DaemonManager {
                     info!("Daemon acknowledged shutdown");
                 }
                 Response::Error { code, message } => {
-                    warn!("Daemon returned error on shutdown: {:?} - {}", code, message);
+                    warn!(
+                        "Daemon returned error on shutdown: {:?} - {}",
+                        code, message
+                    );
                 }
                 _ => {
                     warn!("Unexpected response to shutdown request");

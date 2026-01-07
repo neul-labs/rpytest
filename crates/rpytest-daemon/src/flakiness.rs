@@ -39,8 +39,10 @@ impl FlakinessTracker {
 
     /// Record a test outcome and update statistics.
     pub fn record_outcome(&mut self, node_id: &str, outcome: TestOutcome, message: Option<&str>) {
-        let record = self.records.entry(node_id.to_string()).or_insert_with(|| {
-            FlakinessRecord {
+        let record = self
+            .records
+            .entry(node_id.to_string())
+            .or_insert_with(|| FlakinessRecord {
                 node_id: node_id.to_string(),
                 outcomes: Vec::new(),
                 consecutive_failures: 0,
@@ -48,8 +50,7 @@ impl FlakinessTracker {
                 flaky_streak: 0,
                 total_runs: 0,
                 last_failure_message: None,
-            }
-        });
+            });
 
         let prev_outcome = record.outcomes.last().map(|o| o.clone());
 
@@ -116,7 +117,10 @@ impl FlakinessTracker {
             return false;
         }
         let has_pass = record.outcomes.iter().any(|o| o == "passed");
-        let has_fail = record.outcomes.iter().any(|o| o == "failed" || o == "error");
+        let has_fail = record
+            .outcomes
+            .iter()
+            .any(|o| o == "failed" || o == "error");
         has_pass && has_fail && record.flaky_streak >= 2
     }
 

@@ -1,2 +1,0 @@
-rpytest_daemon
-tests

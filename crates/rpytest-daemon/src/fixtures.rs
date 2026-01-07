@@ -1,12 +1,11 @@
 //! Session fixture reuse management.
 
-use crate::error::Result;
 use crate::models::{FixtureConfig, FixtureScope, FixtureState};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 use tracing::debug;
 
 /// Session state for a pytest session with warm fixtures.
@@ -143,16 +142,18 @@ impl FixtureManager {
                 return;
             }
 
-            let fixture = session.fixtures.entry(name.to_string()).or_insert_with(|| {
-                FixtureState {
-                    name: name.to_string(),
-                    scope,
-                    created_at: now,
-                    last_used: now,
-                    use_count: 0,
-                    teardown_pending: false,
-                }
-            });
+            let fixture =
+                session
+                    .fixtures
+                    .entry(name.to_string())
+                    .or_insert_with(|| FixtureState {
+                        name: name.to_string(),
+                        scope,
+                        created_at: now,
+                        last_used: now,
+                        use_count: 0,
+                        teardown_pending: false,
+                    });
             fixture.last_used = now;
             fixture.use_count += 1;
         }

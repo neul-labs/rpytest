@@ -1,7 +1,7 @@
 //! File watching and incremental test execution.
 
-mod watcher;
 mod dependency;
+mod watcher;
 
-pub use watcher::{FileWatcher, WatchEvent, WatchEventKind, filter_test_files};
-pub use dependency::{DependencyGraph, AffectedTests};
+pub use dependency::{AffectedTests, DependencyGraph};
+pub use watcher::{filter_test_files, FileWatcher, WatchEvent, WatchEventKind};

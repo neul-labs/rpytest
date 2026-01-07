@@ -29,7 +29,10 @@ pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>, FramingError> {
     let payload = rmp_serde::to_vec_named(msg)?;
 
     if payload.len() > MAX_MESSAGE_SIZE {
-        return Err(FramingError::MessageTooLarge(payload.len(), MAX_MESSAGE_SIZE));
+        return Err(FramingError::MessageTooLarge(
+            payload.len(),
+            MAX_MESSAGE_SIZE,
+        ));
     }
 
     let len = payload.len() as u32;
@@ -45,7 +48,10 @@ pub fn encode_payload<T: Serialize>(msg: &T) -> Result<Vec<u8>, FramingError> {
     let payload = rmp_serde::to_vec_named(msg)?;
 
     if payload.len() > MAX_MESSAGE_SIZE {
-        return Err(FramingError::MessageTooLarge(payload.len(), MAX_MESSAGE_SIZE));
+        return Err(FramingError::MessageTooLarge(
+            payload.len(),
+            MAX_MESSAGE_SIZE,
+        ));
     }
 
     Ok(payload)

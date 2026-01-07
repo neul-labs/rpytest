@@ -8,9 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rpytest_core::{
-    Inventory, SledBackend, StorageBackend, TestNode, TestNodeInfo,
-};
+use rpytest_core::{Inventory, SledBackend, StorageBackend, TestNode, TestNodeInfo};
 use tracing::debug;
 
 /// Name of the cache directory.
@@ -50,8 +48,7 @@ impl CacheManager {
     /// Ensure the cache directory exists.
     pub fn ensure_cache_dir(&self) -> Result<()> {
         if !self.cache_dir.exists() {
-            std::fs::create_dir_all(&self.cache_dir)
-                .context("Failed to create cache directory")?;
+            std::fs::create_dir_all(&self.cache_dir).context("Failed to create cache directory")?;
             debug!("Created cache directory: {}", self.cache_dir.display());
         }
         Ok(())
@@ -62,8 +59,7 @@ impl CacheManager {
         if self.storage.is_none() {
             self.ensure_cache_dir()?;
             let db_path = self.cache_dir.join(DB_NAME);
-            let storage = SledBackend::open(&db_path)
-                .context("Failed to open cache database")?;
+            let storage = SledBackend::open(&db_path).context("Failed to open cache database")?;
             self.storage = Some(storage);
         }
         Ok(self.storage.as_ref().unwrap())
@@ -157,8 +153,7 @@ impl CacheManager {
     /// Clear all cached data.
     pub fn clear_all(&mut self) -> Result<()> {
         if self.cache_dir.exists() {
-            std::fs::remove_dir_all(&self.cache_dir)
-                .context("Failed to remove cache directory")?;
+            std::fs::remove_dir_all(&self.cache_dir).context("Failed to remove cache directory")?;
             self.storage = None;
             debug!("Cleared all cache data");
         }
@@ -177,10 +172,8 @@ impl CacheManager {
         match inventory {
             Some(inv) => {
                 let filtered = inv.filter(keyword, marker);
-                let node_ids: Vec<String> = filtered
-                    .into_iter()
-                    .map(|n| n.node_id.clone())
-                    .collect();
+                let node_ids: Vec<String> =
+                    filtered.into_iter().map(|n| n.node_id.clone()).collect();
                 debug!(
                     "Filtered {} -> {} tests (keyword={:?}, marker={:?})",
                     inv.len(),
@@ -280,7 +273,9 @@ mod tests {
         assert_eq!(results.len(), 2);
 
         // Filter by marker
-        let results = cache.filter_tests("ctx-1", None, Some("integration")).unwrap();
+        let results = cache
+            .filter_tests("ctx-1", None, Some("integration"))
+            .unwrap();
         assert_eq!(results.len(), 1);
 
         // Combined filter

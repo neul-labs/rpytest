@@ -28,7 +28,10 @@ impl TestScheduler {
 
     /// Update duration history for a test.
     pub fn update_duration(&mut self, node_id: &str, duration_ms: u64) {
-        let history = self.duration_history.entry(node_id.to_string()).or_default();
+        let history = self
+            .duration_history
+            .entry(node_id.to_string())
+            .or_default();
         history.push(duration_ms);
 
         // Keep only last 10 runs
