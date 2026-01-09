@@ -3,6 +3,8 @@
 //! Maps source files to the tests that import them, so we can
 //! selectively re-run only affected tests when source changes.
 
+#![allow(dead_code)]
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 

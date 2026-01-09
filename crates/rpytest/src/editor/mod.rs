@@ -8,5 +8,7 @@
 mod protocol;
 mod server;
 
+#[allow(unused_imports)]
 pub use protocol::{EditorRequest, EditorResponse, TestLocation};
+#[allow(unused_imports)]
 pub use server::EditorServer;

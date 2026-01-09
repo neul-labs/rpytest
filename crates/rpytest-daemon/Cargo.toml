@@ -46,6 +46,9 @@ sha256 = "1"
 sha2 = "0.10"
 hex = "0.4"
 
+# Concurrency
+parking_lot = "0.12"
+
 # Utilities
 thiserror = "1"
 anyhow = "1"

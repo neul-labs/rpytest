@@ -7,14 +7,20 @@ use crate::error::Result;
 use crate::models::{NativeTestNode, ParameterizedTestNode};
 use rayon::prelude::*;
 use rustpython_ast::{self as ast, ExprAttribute, ExprName};
-use rustpython_parser::parse_program;
-use serde_json::Value;
+use rustpython_parser::Parse;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, warn};
 
+// Type aliases to reduce complexity of deeply nested types
+/// Information about a parameter value: (values, custom_id, marks)
+type ParamValueInfo = (Vec<String>, Option<String>, Vec<String>);
+/// A single parameter combination: (param_names, param_values, custom_id, marks)
+type ParamCombination = (Vec<String>, Vec<String>, Option<String>, Vec<String>);
+
 /// Information extracted from a single parameter value (for pytest.param)
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct ParamValue {
     values: Vec<String>,      // Parameter values
@@ -34,6 +40,34 @@ struct SkipXfailInfo {
     xfail_condition: Option<String>,
     xfail_strict: bool,
     xfail_raises: Option<String>,
+}
+
+/// Context for processing test statements within a class or file
+struct TestProcessingContext<'a> {
+    file_path: &'a str,
+    class_name: &'a str,
+    class_markers: &'a [String],
+    source: &'a str,
+}
+
+/// Context for creating test nodes
+struct TestCreationContext<'a> {
+    fn_name: &'a str,
+    line_number: u32,
+    markers: &'a [String],
+    uses_external_fixtures: bool,
+    skip_xfail: SkipXfailInfo,
+}
+
+/// Decorators that indicate a method is not a test function
+const SKIP_DECORATORS: &[&str] = &["staticmethod", "classmethod", "property", "abstractmethod"];
+
+/// Category of a parameter value for ID generation
+#[derive(Debug, Clone, PartialEq)]
+enum ValueCategory {
+    Dict,
+    List,
+    Simple,
 }
 
 /// Native test collector using RustPython AST parsing.
@@ -105,19 +139,25 @@ impl NativeCollector {
 
     /// Collect all tests using AST parsing.
     pub fn collect(&self) -> Result<Vec<NativeTestNode>> {
-        self.tests.lock().unwrap().clear();
         self.fixture_params.lock().unwrap().clear();
 
         // Find all test files
         let test_files = self.find_test_files()?;
 
-        // Parse files in parallel (this also collects fixture params)
-        test_files.par_iter().for_each(|file| {
-            if let Ok(nodes) = self.parse_test_file(file) {
-                let mut tests = self.tests.lock().unwrap();
-                tests.extend(nodes);
-            }
-        });
+        // Parse files in parallel and collect results without mutex contention
+        // Each thread returns its own Vec, then we flatten at the end
+        let all_tests: Vec<NativeTestNode> = test_files
+            .par_iter()
+            .filter_map(|file| self.parse_test_file(file).ok())
+            .flatten()
+            .collect();
+
+        // Store the collected tests for fixture expansion
+        {
+            let mut tests = self.tests.lock().unwrap();
+            tests.clear();
+            tests.extend(all_tests);
+        }
 
         // Post-process: expand tests based on fixture parametrization
         let expanded_tests = self.expand_tests_by_fixture_params();
@@ -147,9 +187,10 @@ impl NativeCollector {
             } else if fixture_params_for_test.len() == 1 {
                 // Single parametrized fixture - expand into multiple variants
                 let (fixture_name, param_values) = &fixture_params_for_test[0];
-                for (idx, param_value) in param_values.iter().enumerate() {
+                for param_value in param_values.iter() {
                     let mut variant = test.clone();
-                    variant.node_id = format!("{}[{}]", test.node_id, idx + 1);
+                    // Use the actual param value as ID (like pytest does)
+                    variant.node_id = format!("{}[{}]", test.node_id, param_value);
                     // Add marker indicating fixture parametrization
                     variant.markers.push(format!("fixture_param:{}={}", fixture_name, param_value));
                     expanded.push(variant);
@@ -293,10 +334,10 @@ impl NativeCollector {
         };
 
         // Parse using rustpython-parser
-        let syntax = parse_program(&content, "<test>");
+        let syntax = ast::Suite::parse(&content, "<test>");
 
         match syntax {
-            Ok(stmts) => self.extract_tests_from_ast(&stmts, path),
+            Ok(stmts) => self.extract_tests_from_ast(&stmts, path, &content),
             Err(e) => {
                 warn!("Failed to parse {}: {}", path.display(), e);
                 Ok(Vec::new())
@@ -304,11 +345,19 @@ impl NativeCollector {
         }
     }
 
+    /// Convert a byte offset to a 1-based line number.
+    fn byte_offset_to_line(&self, source: &str, offset: usize) -> u32 {
+        let offset = offset.min(source.len());
+        let line = source[..offset].chars().filter(|&c| c == '\n').count() + 1;
+        line as u32
+    }
+
     /// Extract test nodes from Python AST statements.
     fn extract_tests_from_ast(
         &self,
-        stmts: &Vec<ast::Stmt>,
-        path: &PathBuf,
+        stmts: &[ast::Stmt],
+        path: &Path,
+        source: &str,
     ) -> Result<Vec<NativeTestNode>> {
         let mut tests = Vec::new();
         let file_path = path.to_string_lossy().to_string();
@@ -340,13 +389,13 @@ impl NativeCollector {
         }
 
         // Extract tests from statements
-        self.extract_stmt_items(stmts, "", &relative_path, &all_fixtures, &mut tests);
+        self.extract_stmt_items(stmts, "", &relative_path, &all_fixtures, source, &mut tests);
 
         Ok(tests)
     }
 
     /// Extract fixtures from conftest.py (handles both sync and async)
-    fn extract_conftest_fixtures(&self, stmts: &Vec<ast::Stmt>) -> Vec<String> {
+    fn extract_conftest_fixtures(&self, stmts: &[ast::Stmt]) -> Vec<String> {
         let mut fixtures = Vec::new();
 
         for stmt in stmts {
@@ -368,7 +417,8 @@ impl NativeCollector {
     fn check_for_fixture(&self, func: &ast::StmtFunctionDef, fixtures: &mut Vec<String>) {
         for decorator in &func.decorator_list {
             if let Some(name) = self.get_decorator_name(decorator) {
-                if name == "fixture" {
+                // Handle both @fixture and @pytest.fixture
+                if name == "fixture" || name == "pytest.fixture" {
                     fixtures.push(func.name.to_string());
                     // Also check for params
                     self.extract_fixture_params(decorator, &func.name);
@@ -420,8 +470,11 @@ impl NativeCollector {
     fn check_for_async_fixture(&self, func: &ast::StmtAsyncFunctionDef, fixtures: &mut Vec<String>) {
         for decorator in &func.decorator_list {
             if let Some(name) = self.get_decorator_name(decorator) {
-                if name == "fixture" {
+                // Handle both @fixture and @pytest.fixture
+                if name == "fixture" || name == "pytest.fixture" {
                     fixtures.push(func.name.to_string());
+                    // Also check for params
+                    self.extract_fixture_params(decorator, &func.name);
                 }
             }
         }
@@ -492,6 +545,7 @@ impl NativeCollector {
     }
 
     /// Extract parameter values from a parametrize argument list.
+    #[allow(dead_code)]
     fn extract_param_values(&self, expr: &ast::Expr) -> Option<Vec<Vec<String>>> {
         match expr {
             // List of values: [1, 2, 3] or [(1, 2), (3, 4)]
@@ -535,7 +589,11 @@ impl NativeCollector {
             ast::Expr::Dict(ast::ExprDict { keys, values, .. }) => {
                 // Generate a compact representation like pytest does
                 let parts: Vec<String> = keys.iter().zip(values.iter()).filter_map(|(k, v)| {
-                    if let (Some(k_const), Some(v)) = (
+                    // Collapse nested if-let into single match
+                    if let (
+                        Some(k_const),
+                        ast::Expr::Constant(ast::ExprConstant { value, .. })
+                    ) = (
                         k.as_ref().and_then(|k| {
                             if let ast::Expr::Constant(ast::ExprConstant { value: ast::Constant::Str(s), .. }) = k {
                                 Some(s)
@@ -543,13 +601,9 @@ impl NativeCollector {
                                 None
                             }
                         }),
-                        Some(v)
+                        v
                     ) {
-                        if let ast::Expr::Constant(ast::ExprConstant { value, .. }) = v {
-                            Some(format!("{}={}", k_const, self.format_constant(value)))
-                        } else {
-                            None
-                        }
+                        Some(format!("{}={}", k_const, self.format_constant(value)))
                     } else {
                         None
                     }
@@ -625,6 +679,32 @@ impl NativeCollector {
                 }
                 None
             }
+            // UnaryOp: -0, -0.0, -1, etc.
+            ast::Expr::UnaryOp(ast::ExprUnaryOp { op, operand, .. }) => {
+                match (op, operand.as_ref()) {
+                    (ast::UnaryOp::USub, ast::Expr::Constant(ast::ExprConstant { value, .. })) => {
+                        // Negative constant: -0, -0.0, -1, etc.
+                        // Special case: -0 (integer) evaluates to 0 in Python
+                        if let ast::Constant::Int(n) = value {
+                            if n.to_string() == "0" {
+                                // -0 == 0 in Python, so just return 0
+                                return Some((vec!["0".to_string()], None, Vec::new()));
+                            }
+                        }
+                        let formatted = self.format_constant(value);
+                        Some((vec![format!("-{}", formatted)], None, Vec::new()))
+                    }
+                    (ast::UnaryOp::UAdd, ast::Expr::Constant(ast::ExprConstant { value, .. })) => {
+                        // Positive constant: +0, +1, etc. (rare but possible)
+                        Some((vec![self.format_constant(value)], None, Vec::new()))
+                    }
+                    (ast::UnaryOp::Not, _) => {
+                        // not expression - use repr
+                        Some((vec![format!("{:?}", expr)], None, Vec::new()))
+                    }
+                    _ => Some((vec![format!("{:?}", expr)], None, Vec::new())),
+                }
+            }
             // For other expressions, use debug representation
             _ => Some((vec![format!("{:?}", expr)], None, Vec::new())),
         }
@@ -661,7 +741,7 @@ impl NativeCollector {
                 }
             }
             // Attribute access: pytest.mark.skip
-            ast::Expr::Attribute(attr) => {
+            ast::Expr::Attribute(_attr) => {
                 if let Some(name) = self.get_decorator_name(expr) {
                     let marker = name.replace("pytest.mark.", "");
                     marks.push(marker);
@@ -672,8 +752,8 @@ impl NativeCollector {
     }
 
     /// Extract parameter values from a parametrize argument list, including custom IDs and marks.
-    /// Returns Vec<(values, custom_id, marks)>
-    fn extract_param_values_with_info(&self, expr: &ast::Expr) -> Option<Vec<(Vec<String>, Option<String>, Vec<String>)>> {
+    /// Returns Vec<ParamValueInfo> where each element is (values, custom_id, marks)
+    fn extract_param_values_with_info(&self, expr: &ast::Expr) -> Option<Vec<ParamValueInfo>> {
         match expr {
             // List of values: [1, 2, 3] or [(1, 2), (3, 4)]
             ast::Expr::List(ast::ExprList { elts, .. }) => {
@@ -705,6 +785,9 @@ impl NativeCollector {
                 // Clean up float representation
                 if s.contains('e') || s.contains('E') {
                     format!("{:?}", n)
+                } else if !s.contains('.') {
+                    // Ensure floats have decimal point (e.g., 0.0 not 0)
+                    format!("{}.0", s)
                 } else {
                     s
                 }
@@ -722,36 +805,38 @@ impl NativeCollector {
     fn format_param_value(&self, value: &str) -> String {
         // Detect type and format accordingly
         if value == "{}" {
-            // Empty dict
+            // Empty dict - pytest uses dctN prefix
             "dct".to_string()
         } else if value.starts_with('{') {
-            // Dict with content - use dct prefix
+            // Dict with content - pytest uses dctN prefix
             "dct".to_string()
         } else if value == "[]" {
-            // Empty list
+            // Empty list - pytest uses lstN prefix
             "lst".to_string()
         } else if value.starts_with('[') {
-            // List with content - use lst prefix
+            // List with content - pytest uses lstN prefix
             "lst".to_string()
         } else if value == "None" {
             // Python None - use capital N like pytest
             "None".to_string()
         } else if value == "True" || value == "False" {
-            // Booleans lowercase
-            value.to_lowercase()
+            // Booleans - pytest uses capitalized True/False
+            value.to_string()
         } else {
-            // For strings and other types, preserve more characters
-            // Pytest accepts: alphanumeric, underscore, hyphen, dot, space, brackets, colon, slash
+            // Match pytest behavior: preserve most characters, only escape those that break node_id parsing
+            // pytest only needs to escape: [ ] / :: (node_id separators)
+            // Convert escape sequences to literal backslash representation (what pytest shows)
             let sanitized = value
-                .chars()
-                .map(|c| {
-                    if c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == ' ' || c == '/' || c == ':' || c == '[' || c == ']' {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect::<String>();
+                .replace('[', "_")
+                .replace(']', "_")
+                .replace("::", "_")
+                .replace('/', "_")
+                // Convert actual escape sequences to their escaped representation
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t")
+                // Backslash itself should be escaped
+                .replace('\\', "\\");
             // Limit length
             if sanitized.len() > 30 {
                 format!("{}...", &sanitized[..27])
@@ -761,15 +846,87 @@ impl NativeCollector {
         }
     }
 
+    /// Categorize a value for ID generation purposes.
+    fn categorize_value(&self, value: &str) -> ValueCategory {
+        if value == "{}" || value.starts_with('{') {
+            ValueCategory::Dict
+        } else if value == "[]" || value.starts_with('[') {
+            ValueCategory::List
+        } else {
+            ValueCategory::Simple
+        }
+    }
+
+    /// Check if parameter values have mixed types.
+    /// Returns true if there's a mix of container types (list/dict) with simple types.
+    fn has_mixed_param_types(&self, param_values: &[(Vec<String>, Option<String>, Vec<String>)]) -> bool {
+        let mut has_dict = false;
+        let mut has_list = false;
+        let mut has_simple = false;
+
+        for (values, _, _) in param_values {
+            for value in values {
+                match self.categorize_value(value) {
+                    ValueCategory::Dict => has_dict = true,
+                    ValueCategory::List => has_list = true,
+                    ValueCategory::Simple => has_simple = true,
+                }
+            }
+        }
+
+        // Mixed if we have containers (dict or list) AND simple types
+        // OR if we have both dicts AND lists
+        (has_dict || has_list) && has_simple
+    }
+
+    /// Deduplicate IDs by adding _0, _1, etc. suffixes for duplicates.
+    /// This matches pytest's behavior when parameter values evaluate to the same thing.
+    fn deduplicate_ids(&self, ids: &[String]) -> Vec<String> {
+        let mut result = Vec::with_capacity(ids.len());
+        let mut seen: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
+
+        // First pass: group indices by ID
+        for (idx, id) in ids.iter().enumerate() {
+            seen.entry(id.as_str()).or_default().push(idx);
+        }
+
+        // Second pass: generate final IDs
+        let mut counters: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for id in ids {
+            let indices = &seen[id.as_str()];
+            if indices.len() > 1 {
+                // This ID appears multiple times, add suffix
+                let counter = counters.entry(id.as_str()).or_insert(0);
+                result.push(format!("{}_{}", id, counter));
+                *counter += 1;
+            } else {
+                // Unique ID, use as-is
+                result.push(id.clone());
+            }
+        }
+
+        result
+    }
+
     /// Generate pytest-style test ID from parameter values and index.
     /// Pytest uses: type_prefix + index for containers, or just value for simple types.
     fn generate_pytest_id(&self, values: &[String], idx: usize) -> String {
+        self.generate_pytest_id_with_context(values, idx, false)
+    }
+
+    /// Generate pytest-style test ID with context about mixed types.
+    /// When use_value_for_containers is true, uses 'value' prefix for lists/dicts (for mixed-type params).
+    fn generate_pytest_id_with_context(&self, values: &[String], idx: usize, use_value_for_containers: bool) -> String {
         if values.len() == 1 {
             // Single parameter - use format_param_value for the value
-            let formatted = self.format_param_value(&values[0]);
-            // For containers (dict, list), use type prefix + index
+            let formatted = if use_value_for_containers {
+                self.format_param_value_with_context(&values[0], true)
+            } else {
+                self.format_param_value(&values[0])
+            };
+            // For containers (dict, list, value), use prefix + index
             // For simple types (int, str, None), use value directly
-            if formatted == "dct" || formatted == "lst" {
+            if formatted == "dct" || formatted == "lst" || formatted == "value" {
                 format!("{}{}", formatted, idx)
             } else {
                 formatted
@@ -778,10 +935,27 @@ impl NativeCollector {
             // Multiple parameters - format each and join with hyphens
             let formatted: Vec<String> = values
                 .iter()
-                .map(|v| self.format_param_value(v))
+                .map(|v| {
+                    if use_value_for_containers {
+                        self.format_param_value_with_context(v, true)
+                    } else {
+                        self.format_param_value(v)
+                    }
+                })
                 .collect();
             formatted.join("-")
         }
+    }
+
+    /// Format a parameter value with context about whether to use 'value' prefix for containers.
+    fn format_param_value_with_context(&self, value: &str, use_value_for_containers: bool) -> String {
+        if use_value_for_containers {
+            // In mixed-type context, use 'value' prefix for containers
+            if value == "{}" || value.starts_with('{') || value == "[]" || value.starts_with('[') {
+                return "value".to_string();
+            }
+        }
+        self.format_param_value(value)
     }
 
     /// Extract pytest markers from a decorator list (for class-level markers).
@@ -812,37 +986,62 @@ impl NativeCollector {
         stmts: &[ast::Stmt],
         class_name: &str,
         file_path: &str,
-        conftest_fixtures: &Vec<String>,
+        conftest_fixtures: &[String],
+        source: &str,
         tests: &mut Vec<NativeTestNode>,
     ) {
         for stmt in stmts {
             match stmt {
                 // Handle regular function definitions
                 ast::Stmt::FunctionDef(func) => {
-                    self.process_function_def(func, class_name, file_path, conftest_fixtures, tests);
+                    self.process_function_def(func, class_name, file_path, conftest_fixtures, source, tests);
                 }
                 // Handle async function definitions
                 ast::Stmt::AsyncFunctionDef(func) => {
-                    self.process_async_function_def(func, class_name, file_path, conftest_fixtures, tests);
+                    self.process_async_function_def(func, class_name, file_path, conftest_fixtures, source, tests);
                 }
                 ast::Stmt::ClassDef(class_def) => {
                     let class_name_str = &class_def.name;
 
-                    // Pytest collects test methods from any class (not just Test* classes)
-                    // as long as the class name doesn't start with underscore
-                    if !class_name_str.starts_with('_') {
+                    // Pytest only collects test methods from classes starting with "Test"
+                    // (not Base*, Mixin*, Abstract*, etc.)
+                    if class_name_str.starts_with("Test") {
                         // Extract class-level markers
                         let class_markers = self.extract_pytest_markers(&class_def.decorator_list);
 
                         // Extract tests from class methods with inherited markers
+                        let ctx = TestProcessingContext {
+                            file_path,
+                            class_name: class_name_str,
+                            class_markers: &class_markers,
+                            source,
+                        };
                         self.extract_stmt_items_with_class_markers(
                             &class_def.body,
-                            class_name_str,
-                            file_path,
+                            &ctx,
                             conftest_fixtures,
-                            &class_markers,
                             tests,
                         );
+
+                        // Also collect inherited test methods from base classes
+                        // Extract base class names and look for them in the same file
+                        let base_class_names = self.extract_base_class_names(class_def);
+                        for base_name in base_class_names {
+                            // Find the base class definition in the same file
+                            if let Some(base_class) = self.find_class_in_stmts(stmts, &base_name) {
+                                // Collect test methods from base class (recursively handles inheritance)
+                                self.collect_inherited_tests(
+                                    base_class,
+                                    class_name_str, // Use the derived class name
+                                    &class_markers,
+                                    file_path,
+                                    conftest_fixtures,
+                                    source,
+                                    tests,
+                                    stmts, // Pass stmts for recursive base class lookup
+                                );
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -854,40 +1053,37 @@ impl NativeCollector {
     fn extract_stmt_items_with_class_markers(
         &self,
         stmts: &[ast::Stmt],
-        class_name: &str,
-        file_path: &str,
-        conftest_fixtures: &Vec<String>,
-        class_markers: &[String],
+        ctx: &TestProcessingContext,
+        conftest_fixtures: &[String],
         tests: &mut Vec<NativeTestNode>,
     ) {
         for stmt in stmts {
             match stmt {
                 ast::Stmt::FunctionDef(func) => {
-                    self.process_function_def_with_class_markers(
-                        func, class_name, file_path, conftest_fixtures, class_markers, tests,
-                    );
+                    self.process_function_def_with_class_markers(func, ctx, conftest_fixtures, tests);
                 }
                 ast::Stmt::AsyncFunctionDef(func) => {
-                    self.process_async_function_def_with_class_markers(
-                        func, class_name, file_path, conftest_fixtures, class_markers, tests,
-                    );
+                    self.process_async_function_def_with_class_markers(func, ctx, conftest_fixtures, tests);
                 }
                 ast::Stmt::ClassDef(nested_class) => {
                     // Handle nested test classes
-                    // Pytest collects test methods from any class (not just Test* classes)
-                    // as long as the class name doesn't start with underscore
-                    if !nested_class.name.starts_with('_') {
+                    // Pytest only collects test methods from classes starting with "Test"
+                    if nested_class.name.starts_with("Test") {
                         let nested_class_markers = self.extract_pytest_markers(&nested_class.decorator_list);
                         // Combine outer and inner class markers
-                        let mut combined_markers = class_markers.to_vec();
+                        let mut combined_markers = ctx.class_markers.to_vec();
                         combined_markers.extend(nested_class_markers);
 
+                        let nested_ctx = TestProcessingContext {
+                            file_path: ctx.file_path,
+                            class_name: &nested_class.name,
+                            class_markers: &combined_markers,
+                            source: ctx.source,
+                        };
                         self.extract_stmt_items_with_class_markers(
                             &nested_class.body,
-                            &nested_class.name,
-                            file_path,
+                            &nested_ctx,
                             conftest_fixtures,
-                            &combined_markers,
                             tests,
                         );
                     }
@@ -903,34 +1099,53 @@ impl NativeCollector {
         func: &ast::StmtFunctionDef,
         class_name: &str,
         file_path: &str,
-        conftest_fixtures: &Vec<String>,
+        conftest_fixtures: &[String],
+        source: &str,
         tests: &mut Vec<NativeTestNode>,
     ) {
-        self.process_function_def_with_class_markers(func, class_name, file_path, conftest_fixtures, &[], tests);
+        let ctx = TestProcessingContext {
+            file_path,
+            class_name,
+            class_markers: &[],
+            source,
+        };
+        self.process_function_def_with_class_markers(func, &ctx, conftest_fixtures, tests);
     }
 
     /// Process a function definition with inherited class markers.
     fn process_function_def_with_class_markers(
         &self,
         func: &ast::StmtFunctionDef,
-        class_name: &str,
-        file_path: &str,
-        conftest_fixtures: &Vec<String>,
-        class_markers: &[String],
+        ctx: &TestProcessingContext,
+        conftest_fixtures: &[String],
         tests: &mut Vec<NativeTestNode>,
     ) {
         let fn_name = &func.name;
 
         // Check if it's a test function (starts with test_)
         if fn_name.starts_with("test_") || fn_name.starts_with("Test") {
-            let line_number = self.extract_line_number_stmt(func);
             let decorators = &func.decorator_list;
+
+            // Skip methods decorated with @staticmethod, @classmethod, @property, @abstractmethod
+            // These are not valid test functions even if they start with test_
+            let has_skip_decorator = decorators.iter().any(|d| {
+                if let Some(name) = self.get_decorator_name(d) {
+                    SKIP_DECORATORS.contains(&name.as_str())
+                } else {
+                    false
+                }
+            });
+            if has_skip_decorator {
+                return;
+            }
+
+            let line_number = self.extract_line_number_stmt(func, ctx.source);
 
             // Extract markers and parametrize info
             let (method_markers, parametrize_infos) = self.extract_markers_and_parametrize(decorators);
 
             // Merge class markers with method markers
-            let mut all_markers = class_markers.to_vec();
+            let mut all_markers = ctx.class_markers.to_vec();
             all_markers.extend(method_markers);
 
             // Get fixtures used by this test and add markers for them
@@ -946,46 +1161,38 @@ impl NativeCollector {
             // Handle parametrization
             if parametrize_infos.is_empty() {
                 // Single test node
-                self.create_test_node(
+                let test_ctx = TestCreationContext {
                     fn_name,
-                    class_name,
-                    file_path,
                     line_number,
-                    &all_markers,
+                    markers: &all_markers,
                     uses_external_fixtures,
                     skip_xfail,
-                    None,
-                    tests,
-                );
+                };
+                self.create_test_node(&test_ctx, ctx.file_path, ctx.class_name, tests);
             } else if parametrize_infos.len() == 1 {
                 // Single parametrize - expand as before
-                self.expand_parametrized_tests(
+                let test_ctx = TestCreationContext {
                     fn_name,
-                    class_name,
-                    file_path,
                     line_number,
-                    &all_markers,
+                    markers: &all_markers,
                     uses_external_fixtures,
                     skip_xfail,
-                    parametrize_infos.into_iter().next().unwrap(),
-                    tests,
-                );
+                };
+                let param_info = parametrize_infos.into_iter().next().unwrap();
+                self.expand_parametrized_tests(&test_ctx, ctx.file_path, ctx.class_name, param_info, tests);
             } else {
                 // Stacked parametrize - cartesian product
                 // Reverse the order since pytest applies decorators bottom-to-top
                 let mut reversed_infos = parametrize_infos.clone();
                 reversed_infos.reverse();
-                self.expand_stacked_parametrized_tests(
+                let test_ctx = TestCreationContext {
                     fn_name,
-                    class_name,
-                    file_path,
                     line_number,
-                    &all_markers,
+                    markers: &all_markers,
                     uses_external_fixtures,
                     skip_xfail,
-                    reversed_infos,
-                    tests,
-                );
+                };
+                self.expand_stacked_parametrized_tests(&test_ctx, ctx.file_path, ctx.class_name, reversed_infos, tests);
             }
         }
     }
@@ -996,34 +1203,53 @@ impl NativeCollector {
         func: &ast::StmtAsyncFunctionDef,
         class_name: &str,
         file_path: &str,
-        conftest_fixtures: &Vec<String>,
+        conftest_fixtures: &[String],
+        source: &str,
         tests: &mut Vec<NativeTestNode>,
     ) {
-        self.process_async_function_def_with_class_markers(func, class_name, file_path, conftest_fixtures, &[], tests);
+        let ctx = TestProcessingContext {
+            file_path,
+            class_name,
+            class_markers: &[],
+            source,
+        };
+        self.process_async_function_def_with_class_markers(func, &ctx, conftest_fixtures, tests);
     }
 
     /// Process an async function definition with inherited class markers.
     fn process_async_function_def_with_class_markers(
         &self,
         func: &ast::StmtAsyncFunctionDef,
-        class_name: &str,
-        file_path: &str,
-        conftest_fixtures: &Vec<String>,
-        class_markers: &[String],
+        ctx: &TestProcessingContext,
+        conftest_fixtures: &[String],
         tests: &mut Vec<NativeTestNode>,
     ) {
         let fn_name = &func.name;
 
         // Check if it's a test function (starts with test_)
         if fn_name.starts_with("test_") || fn_name.starts_with("Test") {
-            let line_number = self.extract_line_number_async_stmt(func);
             let decorators = &func.decorator_list;
+
+            // Skip methods decorated with @staticmethod, @classmethod, @property, @abstractmethod
+            // These are not valid test functions even if they start with test_
+            let has_skip_decorator = decorators.iter().any(|d| {
+                if let Some(name) = self.get_decorator_name(d) {
+                    SKIP_DECORATORS.contains(&name.as_str())
+                } else {
+                    false
+                }
+            });
+            if has_skip_decorator {
+                return;
+            }
+
+            let line_number = self.extract_line_number_async_stmt(func, ctx.source);
 
             // Extract markers and parametrize info
             let (method_markers, parametrize_infos) = self.extract_markers_and_parametrize(decorators);
 
             // Merge class markers with method markers
-            let mut all_markers = class_markers.to_vec();
+            let mut all_markers = ctx.class_markers.to_vec();
             all_markers.extend(method_markers);
 
             // Check if test uses external fixtures
@@ -1035,46 +1261,38 @@ impl NativeCollector {
             // Handle parametrization
             if parametrize_infos.is_empty() {
                 // Single test node
-                self.create_test_node(
+                let test_ctx = TestCreationContext {
                     fn_name,
-                    class_name,
-                    file_path,
                     line_number,
-                    &all_markers,
+                    markers: &all_markers,
                     uses_external_fixtures,
                     skip_xfail,
-                    None,
-                    tests,
-                );
+                };
+                self.create_test_node(&test_ctx, ctx.file_path, ctx.class_name, tests);
             } else if parametrize_infos.len() == 1 {
                 // Single parametrize - expand as before
-                self.expand_parametrized_tests(
+                let test_ctx = TestCreationContext {
                     fn_name,
-                    class_name,
-                    file_path,
                     line_number,
-                    &all_markers,
+                    markers: &all_markers,
                     uses_external_fixtures,
                     skip_xfail,
-                    parametrize_infos.into_iter().next().unwrap(),
-                    tests,
-                );
+                };
+                let param_info = parametrize_infos.into_iter().next().unwrap();
+                self.expand_parametrized_tests(&test_ctx, ctx.file_path, ctx.class_name, param_info, tests);
             } else {
                 // Stacked parametrize - cartesian product
                 // Reverse the order since pytest applies decorators bottom-to-top
                 let mut reversed_infos = parametrize_infos.clone();
                 reversed_infos.reverse();
-                self.expand_stacked_parametrized_tests(
+                let test_ctx = TestCreationContext {
                     fn_name,
-                    class_name,
-                    file_path,
                     line_number,
-                    &all_markers,
+                    markers: &all_markers,
                     uses_external_fixtures,
                     skip_xfail,
-                    reversed_infos,
-                    tests,
-                );
+                };
+                self.expand_stacked_parametrized_tests(&test_ctx, ctx.file_path, ctx.class_name, reversed_infos, tests);
             }
         }
     }
@@ -1082,59 +1300,57 @@ impl NativeCollector {
     /// Create a single test node.
     fn create_test_node(
         &self,
-        fn_name: &str,
-        class_name: &str,
+        ctx: &TestCreationContext,
         file_path: &str,
-        line_number: u32,
-        markers: &[String],
-        uses_external_fixtures: bool,
-        skip_xfail: SkipXfailInfo,
-        _param_info: Option<ParameterizedTestNode>,
+        class_name: &str,
         tests: &mut Vec<NativeTestNode>,
     ) {
         let node_id = if class_name.is_empty() {
-            format!("{}::{}", file_path, fn_name)
+            format!("{}::{}", file_path, ctx.fn_name)
         } else {
-            format!("{}::{}::{}", file_path, class_name, fn_name)
+            format!("{}::{}::{}", file_path, class_name, ctx.fn_name)
         };
 
-        let mut final_markers = markers.to_vec();
-        if skip_xfail.skip || skip_xfail.skipif {
+        let mut final_markers = ctx.markers.to_vec();
+        if ctx.skip_xfail.skip {
             final_markers.push("skip".to_string());
         }
-        if skip_xfail.xfail {
+        if ctx.skip_xfail.skipif {
+            final_markers.push("skipif".to_string());
+        }
+        if ctx.skip_xfail.xfail {
             final_markers.push("xfail".to_string());
         }
 
         tests.push(NativeTestNode {
             node_id,
             file_path: file_path.to_string(),
-            name: fn_name.to_string(),
+            name: ctx.fn_name.to_string(),
             class_name: if class_name.is_empty() { None } else { Some(class_name.to_string()) },
-            line_number,
+            line_number: ctx.line_number,
             markers: final_markers,
-            is_simple: !uses_external_fixtures,
+            is_simple: !ctx.uses_external_fixtures,
             parameters: Vec::new(),
-            skip: skip_xfail.skip || skip_xfail.skipif,
-            skip_reason: skip_xfail.skip_reason.clone().or(skip_xfail.skipif_condition.clone()),
-            xfail: skip_xfail.xfail,
-            xfail_reason: skip_xfail.xfail_reason.clone(),
-            xfail_strict: skip_xfail.xfail_strict,
+            // Only pre-skip unconditional @pytest.mark.skip, not @pytest.mark.skipif
+            // skipif conditions can only be evaluated at runtime by pytest
+            skip: ctx.skip_xfail.skip,
+            skip_reason: ctx.skip_xfail.skip_reason.clone().or(ctx.skip_xfail.skipif_condition.clone()),
+            xfail: ctx.skip_xfail.xfail,
+            xfail_reason: ctx.skip_xfail.xfail_reason.clone(),
+            xfail_strict: ctx.skip_xfail.xfail_strict,
         });
     }
 
     /// Extract line number from function definition.
-    /// Note: Full line number extraction requires source code mapping which is not yet implemented.
-    fn extract_line_number_stmt(&self, _func: &ast::StmtFunctionDef) -> u32 {
-        // TODO: Extract line number from AST range using source mapping
-        0
+    fn extract_line_number_stmt(&self, func: &ast::StmtFunctionDef, source: &str) -> u32 {
+        let offset = func.range.start().to_usize();
+        self.byte_offset_to_line(source, offset)
     }
 
     /// Extract line number from async function definition.
-    /// Note: Full line number extraction requires source code mapping which is not yet implemented.
-    fn extract_line_number_async_stmt(&self, _func: &ast::StmtAsyncFunctionDef) -> u32 {
-        // TODO: Extract line number from AST range using source mapping
-        0
+    fn extract_line_number_async_stmt(&self, func: &ast::StmtAsyncFunctionDef, source: &str) -> u32 {
+        let offset = func.range.start().to_usize();
+        self.byte_offset_to_line(source, offset)
     }
 
     /// Extract markers and parametrize info from decorator list.
@@ -1266,44 +1482,146 @@ impl NativeCollector {
         None
     }
 
+    /// Extract base class names from a class definition.
+    fn extract_base_class_names(&self, class_def: &ast::StmtClassDef) -> Vec<String> {
+        let mut base_names = Vec::new();
+        for base in &class_def.bases {
+            if let ast::Expr::Name(name) = base {
+                base_names.push(name.id.to_string());
+            } else if let ast::Expr::Attribute(attr) = base {
+                // Handle module.ClassName style
+                base_names.push(attr.attr.to_string());
+            }
+        }
+        base_names
+    }
+
+    /// Find a class definition by name in a list of statements.
+    fn find_class_in_stmts<'a>(&self, stmts: &'a [ast::Stmt], name: &str) -> Option<&'a ast::StmtClassDef> {
+        for stmt in stmts {
+            if let ast::Stmt::ClassDef(class_def) = stmt {
+                if class_def.name.as_str() == name {
+                    return Some(class_def);
+                }
+            }
+        }
+        None
+    }
+
+    /// Collect inherited test methods from a base class.
+    fn collect_inherited_tests(
+        &self,
+        base_class: &ast::StmtClassDef,
+        derived_class_name: &str,
+        derived_class_markers: &[String],
+        file_path: &str,
+        conftest_fixtures: &[String],
+        source: &str,
+        tests: &mut Vec<NativeTestNode>,
+        all_stmts: &[ast::Stmt],
+    ) {
+        // Collect existing method names from derived class to avoid duplicates
+        let existing_methods: std::collections::HashSet<String> = tests
+            .iter()
+            .filter(|t| t.class_name.as_deref() == Some(derived_class_name))
+            .map(|t| t.name.clone())
+            .collect();
+
+        // Process test methods from base class
+        let ctx = TestProcessingContext {
+            file_path,
+            class_name: derived_class_name, // Use derived class name for node_id
+            class_markers: derived_class_markers,
+            source,
+        };
+
+        for stmt in &base_class.body {
+            match stmt {
+                ast::Stmt::FunctionDef(func) => {
+                    // Only process test methods not already defined in derived class
+                    if func.name.starts_with("test_") && !existing_methods.contains(&func.name.to_string()) {
+                        self.process_function_def_with_class_markers(func, &ctx, conftest_fixtures, tests);
+                    }
+                }
+                ast::Stmt::AsyncFunctionDef(func) => {
+                    if func.name.starts_with("test_") && !existing_methods.contains(&func.name.to_string()) {
+                        self.process_async_function_def_with_class_markers(func, &ctx, conftest_fixtures, tests);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Recursively collect from base class's base classes
+        let base_base_names = self.extract_base_class_names(base_class);
+        for base_name in base_base_names {
+            if let Some(base_base_class) = self.find_class_in_stmts(all_stmts, &base_name) {
+                self.collect_inherited_tests(
+                    base_base_class,
+                    derived_class_name,
+                    derived_class_markers,
+                    file_path,
+                    conftest_fixtures,
+                    source,
+                    tests,
+                    all_stmts,
+                );
+            }
+        }
+    }
+
     /// Expand a parametrized test into multiple test nodes.
     fn expand_parametrized_tests(
         &self,
-        fn_name: &str,
-        class_name: &str,
+        ctx: &TestCreationContext,
         file_path: &str,
-        line_number: u32,
-        base_markers: &[String],
-        uses_external_fixtures: bool,
-        skip_xfail: SkipXfailInfo,
+        class_name: &str,
         param_info: ParameterizedTestNode,
         tests: &mut Vec<NativeTestNode>,
     ) {
         let param_names = &param_info.param_names;
         let param_values = &param_info.param_values;
 
-        for (idx, (values, custom_id, variant_marks)) in param_values.iter().enumerate() {
-            // Generate test ID: use custom_id if provided, otherwise auto-generate
-            let test_id = if let Some(id) = custom_id {
+        // Detect if this parametrize has mixed types (to determine ID prefix strategy)
+        // pytest uses type-specific prefix (lst, dct) when all params are same container type,
+        // but uses 'value' prefix for containers when types are mixed
+        let use_value_for_containers = self.has_mixed_param_types(param_values);
+
+        // First pass: generate all base IDs to detect duplicates
+        let mut base_ids: Vec<String> = Vec::with_capacity(param_values.len());
+        for (idx, (values, custom_id, _)) in param_values.iter().enumerate() {
+            let base_id = if let Some(id) = custom_id {
                 id.clone()
             } else {
-                self.generate_pytest_id(values, idx)
+                self.generate_pytest_id_with_context(values, idx, use_value_for_containers)
             };
+            base_ids.push(base_id);
+        }
+
+        // Detect duplicates and assign suffixes
+        let final_ids = self.deduplicate_ids(&base_ids);
+
+        for (idx, (values, _custom_id, variant_marks)) in param_values.iter().enumerate() {
+            // Use the deduplicated ID
+            let test_id = final_ids[idx].clone();
 
             // Build node ID with test ID suffix
             let node_id = if class_name.is_empty() {
-                format!("{}::{}[{}]", file_path, fn_name, test_id)
+                format!("{}::{}[{}]", file_path, ctx.fn_name, test_id)
             } else {
-                format!("{}::{}::{}[{}]", file_path, class_name, fn_name, test_id)
+                format!("{}::{}::{}[{}]", file_path, class_name, ctx.fn_name, test_id)
             };
 
             // Build markers - include base markers, skip/xfail, and per-variant marks
-            let mut markers = base_markers.to_vec();
+            let mut markers = ctx.markers.to_vec();
             markers.extend(variant_marks.clone());
-            if skip_xfail.skip || skip_xfail.skipif {
+            if ctx.skip_xfail.skip {
                 markers.push("skip".to_string());
             }
-            if skip_xfail.xfail {
+            if ctx.skip_xfail.skipif {
+                markers.push("skipif".to_string());
+            }
+            if ctx.skip_xfail.xfail {
                 markers.push("xfail".to_string());
             }
 
@@ -1317,17 +1635,19 @@ impl NativeCollector {
             tests.push(NativeTestNode {
                 node_id,
                 file_path: file_path.to_string(),
-                name: fn_name.to_string(),
+                name: ctx.fn_name.to_string(),
                 class_name: if class_name.is_empty() { None } else { Some(class_name.to_string()) },
-                line_number,
+                line_number: ctx.line_number,
                 markers,
-                is_simple: !uses_external_fixtures,
+                is_simple: !ctx.uses_external_fixtures,
                 parameters,
-                skip: skip_xfail.skip || skip_xfail.skipif,
-                skip_reason: skip_xfail.skip_reason.clone().or(skip_xfail.skipif_condition.clone()),
-                xfail: skip_xfail.xfail,
-                xfail_reason: skip_xfail.xfail_reason.clone(),
-                xfail_strict: skip_xfail.xfail_strict,
+                // Only pre-skip unconditional @pytest.mark.skip, not @pytest.mark.skipif
+            // skipif conditions can only be evaluated at runtime by pytest
+            skip: ctx.skip_xfail.skip,
+                skip_reason: ctx.skip_xfail.skip_reason.clone().or(ctx.skip_xfail.skipif_condition.clone()),
+                xfail: ctx.skip_xfail.xfail,
+                xfail_reason: ctx.skip_xfail.xfail_reason.clone(),
+                xfail_strict: ctx.skip_xfail.xfail_strict,
             });
         }
     }
@@ -1336,13 +1656,9 @@ impl NativeCollector {
     /// Generates Cartesian product of all parameter combinations.
     fn expand_stacked_parametrized_tests(
         &self,
-        fn_name: &str,
-        class_name: &str,
+        ctx: &TestCreationContext,
         file_path: &str,
-        line_number: u32,
-        base_markers: &[String],
-        uses_external_fixtures: bool,
-        skip_xfail: SkipXfailInfo,
+        class_name: &str,
         param_infos: Vec<ParameterizedTestNode>,
         tests: &mut Vec<NativeTestNode>,
     ) {
@@ -1367,18 +1683,21 @@ impl NativeCollector {
 
             // Build node ID with test ID suffix
             let node_id = if class_name.is_empty() {
-                format!("{}::{}[{}]", file_path, fn_name, test_id)
+                format!("{}::{}[{}]", file_path, ctx.fn_name, test_id)
             } else {
-                format!("{}::{}::{}[{}]", file_path, class_name, fn_name, test_id)
+                format!("{}::{}::{}[{}]", file_path, class_name, ctx.fn_name, test_id)
             };
 
             // Build markers - combine base markers with param-specific marks
-            let mut markers = base_markers.to_vec();
+            let mut markers = ctx.markers.to_vec();
             markers.extend(all_marks);
-            if skip_xfail.skip || skip_xfail.skipif {
+            if ctx.skip_xfail.skip {
                 markers.push("skip".to_string());
             }
-            if skip_xfail.xfail {
+            if ctx.skip_xfail.skipif {
+                markers.push("skipif".to_string());
+            }
+            if ctx.skip_xfail.xfail {
                 markers.push("xfail".to_string());
             }
 
@@ -1392,29 +1711,31 @@ impl NativeCollector {
             tests.push(NativeTestNode {
                 node_id,
                 file_path: file_path.to_string(),
-                name: fn_name.to_string(),
+                name: ctx.fn_name.to_string(),
                 class_name: if class_name.is_empty() { None } else { Some(class_name.to_string()) },
-                line_number,
+                line_number: ctx.line_number,
                 markers,
-                is_simple: !uses_external_fixtures,
+                is_simple: !ctx.uses_external_fixtures,
                 parameters,
-                skip: skip_xfail.skip || skip_xfail.skipif,
-                skip_reason: skip_xfail.skip_reason.clone().or(skip_xfail.skipif_condition.clone()),
-                xfail: skip_xfail.xfail,
-                xfail_reason: skip_xfail.xfail_reason.clone(),
-                xfail_strict: skip_xfail.xfail_strict,
+                // Only pre-skip unconditional @pytest.mark.skip, not @pytest.mark.skipif
+            // skipif conditions can only be evaluated at runtime by pytest
+            skip: ctx.skip_xfail.skip,
+                skip_reason: ctx.skip_xfail.skip_reason.clone().or(ctx.skip_xfail.skipif_condition.clone()),
+                xfail: ctx.skip_xfail.xfail,
+                xfail_reason: ctx.skip_xfail.xfail_reason.clone(),
+                xfail_strict: ctx.skip_xfail.xfail_strict,
             });
         }
     }
 
     /// Generate Cartesian product of all parameter combinations from stacked parametrize.
     /// Each ParameterizedTestNode has its own param_names and param_values.
-    /// Returns Vec<Vec<(param_names, param_values, marks)>> where each inner Vec represents
+    /// Returns Vec<Vec<ParamCombination>> where each inner Vec represents
     /// one combination across all parametrize decorators.
     fn generate_cartesian_product(
         &self,
         param_infos: &[ParameterizedTestNode],
-    ) -> Vec<Vec<(Vec<String>, Vec<String>, Option<String>, Vec<String>)>> {
+    ) -> Vec<Vec<ParamCombination>> {
         if param_infos.is_empty() {
             return Vec::new();
         }
@@ -1436,7 +1757,7 @@ impl NativeCollector {
         &self,
         param_infos: &[ParameterizedTestNode],
         index: usize,
-    ) -> Vec<Vec<(Vec<String>, Vec<String>, Option<String>, Vec<String>)>> {
+    ) -> Vec<Vec<ParamCombination>> {
         if index >= param_infos.len() {
             // Base case: return empty combination
             return vec![Vec::new()];
@@ -1460,7 +1781,7 @@ impl NativeCollector {
     fn get_pytest_fixture_usage_func(
         &self,
         args: &ast::Arguments,
-        conftest_fixtures: &Vec<String>,
+        conftest_fixtures: &[String],
     ) -> Vec<String> {
         let mut used = Vec::new();
         for arg in &args.args {
@@ -1476,7 +1797,7 @@ impl NativeCollector {
     fn check_pytest_fixture_usage_async(
         &self,
         args: &ast::Arguments,
-        conftest_fixtures: &Vec<String>,
+        conftest_fixtures: &[String],
     ) -> bool {
         for arg in &args.args {
             let arg_name = &arg.def.arg.to_string();
@@ -1807,8 +2128,10 @@ def test_skipif():
         assert_eq!(tests.len(), 1);
 
         let test = &tests[0];
-        // Should have skip marker
-        assert!(test.markers.contains(&"skip".to_string()));
+        // Should have skipif marker (not pre-skipped, since we can't evaluate the condition)
+        assert!(test.markers.contains(&"skipif".to_string()));
+        // skipif tests should NOT have skip=true since we can't evaluate the condition at collection time
+        assert!(!test.skip);
     }
 
     #[test]
@@ -1882,5 +2205,56 @@ class TestParamMarks:
         let test3 = tests.iter().find(|t| t.node_id.contains("[3]")).unwrap();
         assert!(test3.markers.contains(&"skip".to_string()),
             "Test 3 should have 'skip' marker from pytest.param");
+    }
+
+    #[test]
+    fn test_line_numbers() {
+        let dir = TempDir::new().unwrap();
+        let test_file = dir.path().join("test_lines.py");
+        // Create a file with known line numbers (1-indexed)
+        // Line 1: comment
+        // Line 2: comment
+        // Line 3: empty
+        // Line 4: def test_first()
+        // Line 5: body
+        // Line 6: empty
+        // Line 7: def test_second()
+        // Line 8: body
+        // Line 9: empty
+        // Line 10: class
+        // Line 11: def test_method
+        fs::write(
+            &test_file,
+            r#"# Line 1 - comment
+# Line 2 - comment
+
+def test_first():
+    assert True
+
+def test_second():
+    pass
+
+class TestClass:
+    def test_method(self):
+        pass
+"#,
+        )
+        .unwrap();
+
+        let collector = NativeCollector::new(dir.path());
+        let tests = collector.collect().unwrap();
+
+        // Should find 3 tests
+        assert_eq!(tests.len(), 3);
+
+        // Verify line numbers (functions start with 'def' keyword)
+        let test_first = tests.iter().find(|t| t.name == "test_first").unwrap();
+        assert_eq!(test_first.line_number, 4, "test_first should be at line 4");
+
+        let test_second = tests.iter().find(|t| t.name == "test_second").unwrap();
+        assert_eq!(test_second.line_number, 7, "test_second should be at line 7");
+
+        let test_method = tests.iter().find(|t| t.name == "test_method").unwrap();
+        assert_eq!(test_method.line_number, 11, "test_method should be at line 11");
     }
 }

@@ -3,7 +3,7 @@
 use crate::models::{FixtureConfig, FixtureScope, FixtureState};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tracing::debug;
@@ -72,8 +72,8 @@ impl FixtureManager {
     pub fn create_session(
         &self,
         context_id: &str,
-        repo_path: &PathBuf,
-        python_path: &PathBuf,
+        repo_path: &Path,
+        python_path: &Path,
     ) -> SessionState {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -182,7 +182,7 @@ impl FixtureManager {
 
         let mut stale = Vec::new();
 
-        let mut sessions = self.sessions.lock().unwrap();
+        let sessions = self.sessions.lock().unwrap();
         if let Some(session) = sessions.get(context_id) {
             for (name, state) in &session.fixtures {
                 if now - state.last_used > self.max_age_seconds {

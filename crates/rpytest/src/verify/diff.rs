@@ -1,5 +1,7 @@
 //! Output diff types for verification.
 
+#![allow(dead_code)]
+
 /// Kind of difference found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffKind {

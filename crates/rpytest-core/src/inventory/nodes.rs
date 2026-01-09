@@ -13,8 +13,10 @@ pub type TestNodeId = String;
 /// The kind of test node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum TestNodeKind {
     /// A test function at module level.
+    #[default]
     Function,
     /// A test method within a class.
     Method,
@@ -24,11 +26,6 @@ pub enum TestNodeKind {
     Module,
 }
 
-impl Default for TestNodeKind {
-    fn default() -> Self {
-        Self::Function
-    }
-}
 
 /// A single test node with metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]

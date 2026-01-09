@@ -1,5 +1,7 @@
 //! Editor protocol types (JSON-RPC style).
 
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 
 /// Test location in a file.

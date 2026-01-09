@@ -99,7 +99,7 @@ impl SuiteGenerator {
 
         // Calculate file distribution
         let tests_per_file = options.tests_per_file.unwrap_or(20);
-        let file_count = (test_count + tests_per_file - 1) / tests_per_file;
+        let file_count = test_count.div_ceil(tests_per_file);
 
         // Generate test files
         let mut tests_generated = 0;

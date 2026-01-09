@@ -1,6 +1,6 @@
 //! Benchmark runner for measuring test execution performance.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 

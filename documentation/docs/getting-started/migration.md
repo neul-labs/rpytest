@@ -228,3 +228,29 @@ rpytest uses AST-based collection for speed. If you have dynamic test generation
 # Force pytest-style collection
 rpytest tests/ --no-native-collection
 ```
+
+### Orphaned Daemon Processes
+
+If you previously used an older version of rpytest with a Python daemon, there may be orphaned Python daemon processes still running after upgrading to the Rust-based daemon. To check for and clean up these processes:
+
+```bash
+# Check for orphaned Python daemon processes
+ps aux | grep rpytest_daemon | grep -v grep
+
+# Kill any orphaned Python daemon processes
+pkill -f "python.*rpytest_daemon"
+
+# Alternatively, kill by specific pattern
+pkill -9 -f rpytest_daemon
+
+# Stop the current Rust daemon and restart fresh
+rpytest --daemon-stop
+rpytest tests/ --collect-only  # This will start a fresh daemon
+```
+
+Signs of orphaned daemon processes include:
+- Socket conflicts when starting the daemon
+- Old PID files pointing to non-existent processes
+- Multiple daemon processes consuming memory
+
+The Rust daemon (rpytest-daemon) runs as a separate binary and writes its PID to `/run/user/$UID/rpytest.pid`. Use `rpytest --daemon-status` to check the current daemon state.

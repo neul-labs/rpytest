@@ -2,10 +2,12 @@
 //!
 //! Provides automatic restart, health monitoring, and graceful shutdown.
 
+#![allow(dead_code)]
+
 use std::fs;
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -123,7 +125,7 @@ impl LifecycleManager {
     /// Check if daemon is running.
     pub fn is_running(&self) -> bool {
         self.read_pid()
-            .map(|pid| is_process_alive(pid))
+            .map(is_process_alive)
             .unwrap_or(false)
     }
 

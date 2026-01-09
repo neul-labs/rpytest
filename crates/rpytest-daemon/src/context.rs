@@ -5,7 +5,7 @@ use crate::error::Result;
 use crate::executor::{ExecutorConfig, PythonExecutor};
 use crate::fixtures::FixtureManager;
 use crate::flakiness::FlakinessTracker;
-use crate::models::{RerunConfig, RunSummary, TestNode, TestOutcome, TestResult};
+use crate::models::{RerunConfig, RunSummary, TestNode, TestOutcome};
 use crate::scheduler::TestScheduler;
 use crate::storage::DaemonStorage;
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,37 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tracing::{info, warn};
+
+/// Find a Python interpreter that has pytest installed.
+fn find_python_with_pytest(repo_path: &Path) -> PathBuf {
+    // 1. Check VIRTUAL_ENV environment variable
+    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+        let venv_python = PathBuf::from(&venv).join("bin").join("python");
+        if venv_python.exists() {
+            return venv_python;
+        }
+    }
+
+    // 2. Check for local .venv directory in repo
+    let local_venv = repo_path.join(".venv").join("bin").join("python");
+    if local_venv.exists() {
+        return local_venv;
+    }
+
+    // 3. Check for venv directory in repo
+    let venv_dir = repo_path.join("venv").join("bin").join("python");
+    if venv_dir.exists() {
+        return venv_dir;
+    }
+
+    // 4. Check PYTHON_PATH env var
+    if let Ok(python_path) = std::env::var("PYTHON_PATH") {
+        return PathBuf::from(python_path);
+    }
+
+    // 5. Fall back to python3
+    PathBuf::from("python3")
+}
 
 /// Represents a single test node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,9 +85,11 @@ pub struct RepoContext {
     native_collector: NativeCollector,
     /// Flakiness tracker
     flakiness_tracker: Arc<Mutex<FlakinessTracker>>,
-    /// Fixture manager
+    /// Fixture manager (planned feature)
+    #[allow(dead_code)]
     fixture_manager: Arc<Mutex<FixtureManager>>,
-    /// Re-run configuration
+    /// Re-run configuration (planned feature)
+    #[allow(dead_code)]
     rerun_config: RerunConfig,
     /// Storage backend
     storage: Option<DaemonStorage>,
@@ -76,9 +109,7 @@ impl RepoContext {
         python_path: Option<PathBuf>,
         storage: Option<DaemonStorage>,
     ) -> Self {
-        let python_path = python_path.unwrap_or_else(|| {
-            PathBuf::from(std::env::var("PYTHON_PATH").unwrap_or_else(|_| "python".to_string()))
-        });
+        let python_path = python_path.unwrap_or_else(|| find_python_with_pytest(repo_path));
 
         let storage_path = repo_path.join(".rpytest");
 
@@ -242,6 +273,28 @@ impl RepoContext {
         config.maxfail = maxfail;
         self.executor.configure(config);
 
+        // Separate pre-skipped tests from runnable tests
+        // Tests with skip=true from collection markers should be counted as skipped without running
+        let (runnable_node_ids, pre_skipped_count): (Vec<String>, usize) = {
+            let inventory = self.inventory.lock().unwrap();
+            let mut runnable = Vec::with_capacity(node_ids.len());
+            let mut skipped_count = 0;
+
+            for node_id in node_ids {
+                if let Some(node) = inventory.get(node_id) {
+                    if node.skip {
+                        skipped_count += 1;
+                    } else {
+                        runnable.push(node_id.clone());
+                    }
+                } else {
+                    // Node not in inventory - run it anyway (might be a new test)
+                    runnable.push(node_id.clone());
+                }
+            }
+            (runnable, skipped_count)
+        };
+
         // Update scheduler with latest durations
         {
             let durations: Vec<(String, u64)> = {
@@ -260,8 +313,8 @@ impl RepoContext {
             }
         }
 
-        // Run tests
-        let results = self.executor.run_tests(node_ids).await;
+        // Run tests (excluding pre-skipped ones)
+        let results = self.executor.run_tests(&runnable_node_ids).await;
 
         // Process results
         let mut passed = 0;
@@ -310,9 +363,19 @@ impl RepoContext {
                 TestOutcome::Failed => failed += 1,
                 TestOutcome::Skipped => skipped += 1,
                 TestOutcome::Error => errors += 1,
-                _ => {}
+                TestOutcome::Xfail => {
+                    // Expected failure that failed - don't count as passed or failed
+                    // These are "successful failures"
+                }
+                TestOutcome::Xpass => {
+                    // Expected failure that passed - don't count as passed to match pytest behavior
+                    // pytest counts xpassed separately, not as "passed"
+                }
             }
         }
+
+        // Add pre-skipped tests (those with skip marker from collection) to skipped count
+        skipped += pre_skipped_count;
 
         // Save state
         self.save_state()?;
@@ -320,7 +383,7 @@ impl RepoContext {
         let duration_ms = start_time.elapsed().unwrap_or(Duration::ZERO).as_millis() as u64;
 
         Ok(RunSummary {
-            total: results.len(),
+            total: results.len() + pre_skipped_count,
             passed,
             failed,
             skipped,

@@ -1,7 +1,9 @@
 //! Drop-in compatibility verification.
 
+#![allow(dead_code)]
+
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -28,18 +30,8 @@ pub struct VerifyConfig {
 
 impl Default for VerifyConfig {
     fn default() -> Self {
-        // Try to use python from active virtualenv if available
-        let python = std::env::var("VIRTUAL_ENV")
-            .ok()
-            .map(|venv| {
-                let venv_python = PathBuf::from(&venv).join("bin").join("python");
-                if venv_python.exists() {
-                    venv_python.to_string_lossy().to_string()
-                } else {
-                    "python3".to_string()
-                }
-            })
-            .unwrap_or_else(|| "python3".to_string());
+        // Try to find a Python with pytest installed
+        let python = find_python_with_pytest();
 
         Self {
             root: PathBuf::from("."),
@@ -49,6 +41,32 @@ impl Default for VerifyConfig {
             timeout_secs: 300,
         }
     }
+}
+
+/// Find a Python interpreter that has pytest installed.
+fn find_python_with_pytest() -> String {
+    // 1. Check VIRTUAL_ENV environment variable
+    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+        let venv_python = PathBuf::from(&venv).join("bin").join("python");
+        if venv_python.exists() {
+            return venv_python.to_string_lossy().to_string();
+        }
+    }
+
+    // 2. Check for local .venv directory
+    let local_venv = PathBuf::from(".venv").join("bin").join("python");
+    if local_venv.exists() {
+        return local_venv.to_string_lossy().to_string();
+    }
+
+    // 3. Check for venv directory
+    let venv_dir = PathBuf::from("venv").join("bin").join("python");
+    if venv_dir.exists() {
+        return venv_dir.to_string_lossy().to_string();
+    }
+
+    // 4. Fall back to python3
+    "python3".to_string()
 }
 
 /// Result of a verification run.

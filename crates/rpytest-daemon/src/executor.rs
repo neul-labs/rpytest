@@ -2,15 +2,15 @@
 
 use crate::error::Result;
 use crate::models::{TestOutcome, TestResult};
-use rayon::prelude::*;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdout, Command as AsyncCommand};
-use tracing::{debug, info};
+use tracing::{debug, error};
 
 /// Executor configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -115,24 +115,34 @@ impl PythonExecutor {
         let workers = self.config.workers.unwrap_or(1) as usize;
 
         if workers > 1 && batches.len() > 1 {
-            // Parallel execution - collect results then extend
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(workers)
-                .build()
-                .unwrap();
+            // Parallel execution using tokio's native concurrency
+            // Limit concurrent batches to worker count using semaphore
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(workers));
+            let mut handles = Vec::with_capacity(batches.len());
 
-            let all_results: Vec<Vec<TestResult>> = pool.install(|| {
-                batches
-                    .into_par_iter()
-                    .map(|batch| {
-                        let rt = tokio::runtime::Runtime::new().unwrap();
-                        rt.block_on(async { self.run_batch(&batch).await })
-                    })
-                    .collect()
-            });
+            for batch in batches {
+                let permit = semaphore.clone().acquire_owned().await;
+                let executor = self.clone();
 
-            // Flatten results
-            all_results.into_iter().flatten().collect()
+                let handle = tokio::spawn(async move {
+                    let _permit = permit; // Hold permit until batch completes
+                    executor.run_batch(&batch).await
+                });
+                handles.push(handle);
+            }
+
+            // Collect results from all handles
+            let mut all_results = Vec::with_capacity(node_ids.len());
+            for handle in handles {
+                match handle.await {
+                    Ok(batch_results) => all_results.extend(batch_results),
+                    Err(e) => {
+                        error!("Batch execution failed: {}", e);
+                        // Continue with other batches
+                    }
+                }
+            }
+            all_results
         } else {
             // Sequential execution
             let mut results = Vec::with_capacity(node_ids.len());
@@ -151,7 +161,7 @@ impl PythonExecutor {
     }
 
     /// Run pytest with the given arguments.
-    async fn run_pytest(&self, node_ids: &[String], output_file: Option<&str>) -> String {
+    async fn run_pytest(&self, node_ids: &[String], _output_file: Option<&str>) -> String {
         // Allow tests to bypass spawning a real Python interpreter.
         if std::env::var("RPYTEST_FAKE_PYTEST").is_ok() {
             let mut output = String::new();
@@ -170,8 +180,9 @@ impl PythonExecutor {
         }
 
         // Add configuration
+        // Use -v for verbose output with full test names (needed for parsing outcomes)
+        args.push("-v".to_string());
         args.push("--tb=short".to_string());
-        args.push("-q".to_string());
         args.push("--no-header".to_string());
 
         // Add maxfail
@@ -183,28 +194,52 @@ impl PythonExecutor {
         // Add extra args
         args.extend(self.config.extra_args.clone());
 
-        // Capture output
-        args.push("-v".to_string());
+        // Allow output capture
         args.push("--capture=no".to_string());
 
         debug!("Running: {} {:?}", self.python_path.display(), args);
 
-        let mut child = AsyncCommand::new(&self.python_path)
+        let mut child = match AsyncCommand::new(&self.python_path)
             .args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .expect("Failed to spawn pytest");
+        {
+            Ok(child) => child,
+            Err(e) => {
+                error!("Failed to spawn pytest: {}", e);
+                return format!("ERROR: Failed to spawn pytest: {}", e);
+            }
+        };
 
-        let stdout = child.stdout.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                error!("Failed to capture stdout");
+                return "ERROR: Failed to capture stdout".to_string();
+            }
+        };
+
+        let stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => {
+                error!("Failed to capture stderr");
+                return "ERROR: Failed to capture stderr".to_string();
+            }
+        };
 
         // Read output
         let output = Self::read_output(stdout, stderr).await;
 
         // Wait for process to complete
-        let status = child.wait().await.expect("Failed to wait on pytest");
+        let status = match child.wait().await {
+            Ok(status) => status,
+            Err(e) => {
+                error!("Failed to wait on pytest: {}", e);
+                return format!("{}\nERROR: Failed to wait on pytest: {}", output, e);
+            }
+        };
 
         let mut result = output;
         if !status.success() {
@@ -294,6 +329,30 @@ impl PythonExecutor {
                     if let Some(pos) = test_ref.find("::") {
                         let test_name = &test_ref[pos + 2..];
                         line_outcomes.insert(test_name.to_string(), TestOutcome::Skipped);
+                    }
+                }
+            }
+            // Check for XFAIL lines (expected failure)
+            else if line.contains(" XFAIL") || line.ends_with(" XFAIL") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let test_ref = parts[0];
+                    line_outcomes.insert(test_ref.to_string(), TestOutcome::Xfail);
+                    if let Some(pos) = test_ref.find("::") {
+                        let test_name = &test_ref[pos + 2..];
+                        line_outcomes.insert(test_name.to_string(), TestOutcome::Xfail);
+                    }
+                }
+            }
+            // Check for XPASS lines (expected failure that passed)
+            else if line.contains(" XPASS") || line.ends_with(" XPASS") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let test_ref = parts[0];
+                    line_outcomes.insert(test_ref.to_string(), TestOutcome::Xpass);
+                    if let Some(pos) = test_ref.find("::") {
+                        let test_name = &test_ref[pos + 2..];
+                        line_outcomes.insert(test_name.to_string(), TestOutcome::Xpass);
                     }
                 }
             }
@@ -404,9 +463,9 @@ impl PythonExecutor {
 
     /// Kill all running processes.
     pub fn kill_all(&self) {
-        let mut processes = self.processes.lock().unwrap();
+        let mut processes = self.processes.lock();
         for (_, child) in processes.iter_mut() {
-            let _ = child.kill();
+            drop(child.kill());
         }
         processes.clear();
     }

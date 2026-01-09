@@ -1,5 +1,7 @@
 //! Terminal output formatting utilities.
 
+#![allow(dead_code)]
+
 use console::{style, Term};
 
 /// Output handler with verbosity control.

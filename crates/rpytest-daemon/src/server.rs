@@ -11,9 +11,10 @@ use rpytest_core::protocol::{ErrorCode, Request, Response, PROTOCOL_VERSION};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use parking_lot::Mutex;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 use std::thread;
 use std::time::Duration;
@@ -21,8 +22,9 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
-/// Type alias for the contexts map
-type ContextMap = Mutex<HashMap<String, RepoContext>>;
+/// Type alias for the contexts map - each context is wrapped in Arc<tokio::sync::Mutex>
+/// to allow concurrent access without removing/reinserting from the map
+type ContextMap = Mutex<HashMap<String, Arc<tokio::sync::Mutex<RepoContext>>>>;
 
 struct RequestJob {
     message: Vec<u8>,
@@ -38,7 +40,8 @@ pub struct DaemonServer {
     storage: DaemonStorage,
     /// Active contexts (context_id -> RepoContext)
     contexts: Arc<ContextMap>,
-    /// Server configuration
+    /// Server configuration (planned feature)
+    #[allow(dead_code)]
     config: DaemonConfig,
 }
 
@@ -119,7 +122,7 @@ impl DaemonServer {
         let socket_running = running_clone.clone();
         let socket_tx = request_tx.clone();
         thread::spawn(move || {
-            let mut socket = socket;
+            let socket = socket;
             while socket_running.load(Ordering::SeqCst) {
                 match socket.recv() {
                     Ok(msg) => {
@@ -252,15 +255,11 @@ impl DaemonServer {
                     None,
                     Some(storage.clone()),
                 );
+                let inventory_hash = context.inventory_hash.clone();
 
-                // Store context
-                let mut contexts = contexts.lock().unwrap();
-                contexts.insert(context_id.clone(), context);
-
-                let inventory_hash = contexts
-                    .get(&context_id)
-                    .map(|c| c.inventory_hash.clone())
-                    .unwrap_or_default();
+                // Store context wrapped in Arc<tokio::sync::Mutex> for concurrent access
+                let mut contexts = contexts.lock();
+                contexts.insert(context_id.clone(), Arc::new(tokio::sync::Mutex::new(context)));
 
                 Response::ContextReady {
                     protocol_version: PROTOCOL_VERSION,
@@ -270,8 +269,14 @@ impl DaemonServer {
             }
 
             Request::Collect { context_id, force } => {
-                let mut contexts = contexts.lock().unwrap();
-                if let Some(context) = contexts.get_mut(&context_id) {
+                // Get the Arc, then release the map lock before locking the context
+                let context_arc = {
+                    let contexts = contexts.lock();
+                    contexts.get(&context_id).cloned()
+                };
+
+                if let Some(context_arc) = context_arc {
+                    let mut context = context_arc.lock().await;
                     match context.collect(force) {
                         Ok((count, duration_ms)) => Response::CollectionComplete {
                             node_count: count,
@@ -296,15 +301,16 @@ impl DaemonServer {
                 workers,
                 maxfail,
             } => {
-                let mut context_opt = {
-                    let mut contexts_lock = contexts.lock().unwrap();
-                    contexts_lock.remove(&context_id)
+                // Get the Arc, then release the map lock before locking the context
+                // This prevents the race condition where context was removed/reinserted
+                let context_arc = {
+                    let contexts = contexts.lock();
+                    contexts.get(&context_id).cloned()
                 };
 
-                if let Some(mut context) = context_opt.take() {
+                if let Some(context_arc) = context_arc {
+                    let mut context = context_arc.lock().await;
                     let run_result = context.run_tests(&node_ids, workers, maxfail).await;
-                    let mut contexts_lock = contexts.lock().unwrap();
-                    contexts_lock.insert(context_id.clone(), context);
 
                     match run_result {
                         Ok(summary) => Response::RunComplete {
@@ -333,8 +339,13 @@ impl DaemonServer {
                 keyword,
                 marker,
             } => {
-                let contexts = contexts.lock().unwrap();
-                if let Some(context) = contexts.get(&context_id) {
+                let context_arc = {
+                    let contexts = contexts.lock();
+                    contexts.get(&context_id).cloned()
+                };
+
+                if let Some(context_arc) = context_arc {
+                    let context = context_arc.lock().await;
                     let filtered: Vec<TestNode> = if let Some(kw) = keyword {
                         context.filter_by_keyword(&kw)
                     } else if let Some(mk) = marker {
@@ -355,8 +366,13 @@ impl DaemonServer {
             }
 
             Request::GetInventory { context_id } => {
-                let contexts = contexts.lock().unwrap();
-                if let Some(context) = contexts.get(&context_id) {
+                let context_arc = {
+                    let contexts = contexts.lock();
+                    contexts.get(&context_id).cloned()
+                };
+
+                if let Some(context_arc) = context_arc {
+                    let context = context_arc.lock().await;
                     let nodes: Vec<TestNode> = context.get_inventory();
                     Response::InventoryData {
                         hash: context.inventory_hash.clone(),
@@ -374,7 +390,7 @@ impl DaemonServer {
             Request::Ping => Response::Pong,
 
             Request::Shutdown { context_id } => {
-                let mut contexts = contexts.lock().unwrap();
+                let mut contexts = contexts.lock();
                 if let Some(id) = context_id {
                     contexts.remove(&id);
                 } else {
@@ -414,8 +430,13 @@ impl DaemonServer {
             },
 
             Request::GetFlakinessReport { context_id } => {
-                let contexts = contexts.lock().unwrap();
-                if let Some(context) = contexts.get(&context_id) {
+                let context_arc = {
+                    let contexts = contexts.lock();
+                    contexts.get(&context_id).cloned()
+                };
+
+                if let Some(context_arc) = context_arc {
+                    let context = context_arc.lock().await;
                     let _report = context.get_flakiness_report();
                     Response::FlakinessReport {
                         flaky_tests: Vec::new(),
@@ -457,7 +478,7 @@ mod tests {
         let storage_path = dir.path().join("storage");
 
         let server = DaemonServer::new(socket_path, storage_path).unwrap();
-        assert!(server.contexts.lock().unwrap().is_empty());
+        assert!(server.contexts.lock().is_empty());
     }
 
     #[test]

@@ -2,6 +2,8 @@
 //!
 //! Handles spawning, connecting to, and managing the pytest daemon process.
 
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;

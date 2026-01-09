@@ -1,5 +1,7 @@
 //! File system watcher for detecting changes.
 
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 use std::time::Duration;
@@ -162,9 +164,8 @@ impl FileWatcher {
         let path_str = path.to_string_lossy();
 
         for pattern in &self.ignore_patterns {
-            if pattern.starts_with('*') {
+            if let Some(suffix) = pattern.strip_prefix('*') {
                 // Suffix match
-                let suffix = &pattern[1..];
                 if path_str.ends_with(suffix) {
                     return true;
                 }

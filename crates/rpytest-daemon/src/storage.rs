@@ -8,7 +8,7 @@ use rmp_serde::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
 use sled::{Db, Tree};
 use std::path::PathBuf;
-use tracing::{debug, error};
+use tracing::error;
 
 /// Storage tree names.
 const TREE_INVENTORY: &str = "inventory";
@@ -115,6 +115,22 @@ impl DaemonStorage {
         Ok(())
     }
 
+    /// Save multiple test nodes to inventory in a batch (much faster than individual saves).
+    pub fn save_test_nodes_batch(&self, nodes: &[TestNode]) -> Result<()> {
+        if nodes.is_empty() {
+            return Ok(());
+        }
+
+        let mut batch = sled::Batch::default();
+        for node in nodes {
+            let mut buf = Vec::new();
+            node.serialize(&mut Serializer::new(&mut buf))?;
+            batch.insert(node.node_id.as_bytes(), buf);
+        }
+        self.inventory.apply_batch(batch)?;
+        Ok(())
+    }
+
     /// Load a test node from inventory.
     pub fn load_test_node(&self, node_id: &str) -> Result<Option<TestNode>> {
         if let Some(bytes) = self.inventory.get(node_id)? {
@@ -156,6 +172,22 @@ impl DaemonStorage {
         let mut buf = Vec::new();
         node.serialize(&mut Serializer::new(&mut buf))?;
         self.native_tests.insert(&node.node_id, buf)?;
+        Ok(())
+    }
+
+    /// Save multiple native test nodes in a batch (much faster than individual saves).
+    pub fn save_native_tests_batch(&self, nodes: &[NativeTestNode]) -> Result<()> {
+        if nodes.is_empty() {
+            return Ok(());
+        }
+
+        let mut batch = sled::Batch::default();
+        for node in nodes {
+            let mut buf = Vec::new();
+            node.serialize(&mut Serializer::new(&mut buf))?;
+            batch.insert(node.node_id.as_bytes(), buf);
+        }
+        self.native_tests.apply_batch(batch)?;
         Ok(())
     }
 

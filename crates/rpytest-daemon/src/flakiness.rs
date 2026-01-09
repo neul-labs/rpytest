@@ -52,7 +52,7 @@ impl FlakinessTracker {
                 last_failure_message: None,
             });
 
-        let prev_outcome = record.outcomes.last().map(|o| o.clone());
+        let prev_outcome = record.outcomes.last().cloned();
 
         record.outcomes.push(outcome.clone().into());
 
@@ -92,7 +92,7 @@ impl FlakinessTracker {
         }
 
         // Auto-save
-        if let Some(ref path) = self.storage_path {
+        if let Some(ref _path) = self.storage_path {
             let _ = self.save();
         }
     }

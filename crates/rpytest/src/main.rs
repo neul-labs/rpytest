@@ -260,10 +260,9 @@ async fn handle_verify_dropin(cli: &Cli, root: &std::path::Path) -> Result<()> {
 
     let config = verify::VerifyConfig {
         root: root.to_path_buf(),
-        python: "python3".to_string(),
         pytest_args: cli.paths.clone(),
         strict_output: cli.verbose >= 2,
-        timeout_secs: 300,
+        ..verify::VerifyConfig::default()
     };
 
     output.info("Running pytest...");
@@ -546,7 +545,7 @@ async fn handle_run(cli: &Cli, root: &std::path::Path) -> Result<()> {
         })
         .await?;
 
-    let (context_id, inventory_hash) = match response {
+    let (context_id, _initial_hash) = match response {
         Response::ContextReady {
             context_id,
             inventory_hash,
@@ -997,15 +996,14 @@ async fn handle_cleanup(cli: &Cli, root: &std::path::Path) -> Result<()> {
 
     // Also clean up runtime files if requested
     let config = LifecycleConfig::default();
-    if config.socket_path.exists() {
-        if !daemon::LifecycleManager::new(config.clone()).is_running() {
+    if config.socket_path.exists()
+        && !daemon::LifecycleManager::new(config.clone()).is_running() {
             std::fs::remove_file(&config.socket_path).ok();
             output.info(&format!(
                 "Removed stale socket: {}",
                 config.socket_path.display()
             ));
         }
-    }
 
     if result.removed > 0 {
         output.info(&format!("Cleaned up {} stale context(s)", result.removed));

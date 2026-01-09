@@ -6,6 +6,8 @@
 //! 3. tox.ini [pytest]
 //! 4. setup.cfg [tool:pytest]
 
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 

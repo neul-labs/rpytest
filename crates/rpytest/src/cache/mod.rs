@@ -5,6 +5,8 @@
 //! - Duration history
 //! - Outcome history
 
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -70,7 +72,7 @@ impl CacheManager {
         let storage = self.open_storage()?;
 
         match Inventory::load(storage, context_id) {
-            Ok(inv) if inv.len() > 0 => {
+            Ok(inv) if !inv.is_empty() => {
                 debug!("Loaded {} tests from cache for {}", inv.len(), context_id);
                 Ok(Some(inv))
             }
