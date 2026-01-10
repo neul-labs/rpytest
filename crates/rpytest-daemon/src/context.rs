@@ -2,12 +2,13 @@
 
 use crate::collector::NativeCollector;
 use crate::error::Result;
-use crate::executor::{ExecutorConfig, PythonExecutor};
+use crate::executor::{create_executor, create_pooled_executor, ExecutorConfig, TestExecutor};
 use crate::fixtures::FixtureManager;
 use crate::flakiness::FlakinessTracker;
-use crate::models::{RerunConfig, RunSummary, TestNode, TestOutcome};
+use crate::models::{ExecutionMode, RerunConfig, RunSummary, TestNode, TestOutcome};
 use crate::scheduler::TestScheduler;
 use crate::storage::DaemonStorage;
+use parking_lot::Mutex as PLMutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -61,7 +62,7 @@ pub struct TestNodeInternal {
 }
 
 /// Represents a repository execution context.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RepoContext {
     /// Unique context ID
     pub context_id: String,
@@ -79,8 +80,10 @@ pub struct RepoContext {
     outcome_history: Arc<Mutex<HashMap<String, Vec<String>>>>,
     /// Scheduler for test ordering
     scheduler: Arc<Mutex<TestScheduler>>,
-    /// Test executor
-    executor: PythonExecutor,
+    /// Test executor (supports both embedded and subprocess modes)
+    executor: Arc<PLMutex<Box<dyn TestExecutor>>>,
+    /// Execution mode being used
+    pub execution_mode: ExecutionMode,
     /// Native test collector
     native_collector: NativeCollector,
     /// Flakiness tracker
@@ -103,28 +106,64 @@ pub struct RepoContext {
 
 impl RepoContext {
     /// Create a new context.
-    pub fn new(
+    ///
+    /// # Arguments
+    /// * `context_id` - Unique identifier for this context
+    /// * `repo_path` - Path to the repository root
+    /// * `python_path` - Optional path to Python interpreter (auto-detected if None)
+    /// * `storage` - Optional storage backend for persistence
+    /// * `execution_mode` - Execution mode (Embedded, Subprocess, Pooled, or Auto)
+    pub async fn new(
         context_id: &str,
         repo_path: &Path,
         python_path: Option<PathBuf>,
         storage: Option<DaemonStorage>,
-    ) -> Self {
+        execution_mode: ExecutionMode,
+    ) -> Result<Self> {
         let python_path = python_path.unwrap_or_else(|| find_python_with_pytest(repo_path));
 
         let storage_path = repo_path.join(".rpytest");
 
         let flakiness_tracker = FlakinessTracker::new(Some(storage_path.join("flakiness.json")));
 
-        RepoContext {
+        // Create executor based on execution mode
+        let (executor, actual_mode): (Box<dyn TestExecutor>, ExecutionMode) = match execution_mode {
+            ExecutionMode::Pooled => {
+                // Pooled mode: create async worker pool with repo_path as working directory
+                let worker_count = num_cpus::get();
+                info!("Creating pooled executor with {} workers in {}", worker_count, repo_path.display());
+                let executor = create_pooled_executor(python_path.clone(), Some(worker_count), repo_path.to_path_buf()).await?;
+                (executor, ExecutionMode::Pooled)
+            }
+            other => {
+                // Other modes: use sync creation
+                let executor = create_executor(other, python_path.clone())?;
+                let mode = match executor.execution_mode() {
+                    "embedded" => ExecutionMode::Embedded,
+                    "pooled" => ExecutionMode::Pooled,
+                    _ => ExecutionMode::Subprocess,
+                };
+                (executor, mode)
+            }
+        };
+
+        info!(
+            "Created context {} with {} executor",
+            context_id,
+            executor.execution_mode()
+        );
+
+        Ok(RepoContext {
             context_id: context_id.to_string(),
             repo_path: repo_path.to_path_buf(),
-            python_path: python_path.clone(),
+            python_path,
             inventory: Arc::new(Mutex::new(HashMap::new())),
             inventory_hash: String::new(),
             duration_history: Arc::new(Mutex::new(HashMap::new())),
             outcome_history: Arc::new(Mutex::new(HashMap::new())),
             scheduler: Arc::new(Mutex::new(TestScheduler::new())),
-            executor: PythonExecutor::new(python_path),
+            executor: Arc::new(PLMutex::new(executor)),
+            execution_mode: actual_mode,
             native_collector: NativeCollector::new(repo_path),
             flakiness_tracker: Arc::new(Mutex::new(flakiness_tracker)),
             fixture_manager: Arc::new(Mutex::new(FixtureManager::new())),
@@ -133,7 +172,7 @@ impl RepoContext {
             use_native: true,
             last_collection_time: 0.0,
             total_runs: 0,
-        }
+        })
     }
 
     /// Collect tests using cached inventory or in-process collection.
@@ -183,12 +222,11 @@ impl RepoContext {
                 );
             }
 
-            // Save to storage
+            // Save to storage using batch operation (much faster than individual saves)
             if let Some(ref storage) = self.storage {
                 storage.clear_inventory()?;
-                for node in inventory.values().cloned().collect::<Vec<_>>() {
-                    storage.save_test_node(&node)?;
-                }
+                let nodes: Vec<TestNode> = inventory.values().cloned().collect();
+                storage.save_test_nodes_batch(&nodes)?;
             }
         } else {
             // Fall back to pytest collection (not implemented in pure Rust yet)
@@ -271,7 +309,10 @@ impl RepoContext {
         let mut config = ExecutorConfig::new();
         config.workers = workers;
         config.maxfail = maxfail;
-        self.executor.configure(config);
+        {
+            let mut executor = self.executor.lock();
+            executor.configure(config);
+        }
 
         // Separate pre-skipped tests from runnable tests
         // Tests with skip=true from collection markers should be counted as skipped without running
@@ -314,14 +355,19 @@ impl RepoContext {
         }
 
         // Run tests (excluding pre-skipped ones)
-        let results = self.executor.run_tests(&runnable_node_ids).await;
+        // Clone the executor Arc to avoid holding the lock across await
+        let executor = self.executor.clone();
+        let start_time = SystemTime::now(); // Start timing BEFORE test execution
+        let results = {
+            let executor = executor.lock();
+            executor.run_tests(&runnable_node_ids).await
+        };
 
         // Process results
         let mut passed = 0;
         let mut failed = 0;
         let mut skipped = 0;
         let mut errors = 0;
-        let start_time = SystemTime::now();
 
         for result in &results {
             // Update duration history
@@ -395,15 +441,17 @@ impl RepoContext {
     /// Save context state to storage.
     fn save_state(&self) -> Result<()> {
         if let Some(ref storage) = self.storage {
-            // Save flakiness data
-            let tracker = self.flakiness_tracker.lock().unwrap();
-            tracker.save()?;
+            // Save flakiness data (uses buffered writes)
+            let mut tracker = self.flakiness_tracker.lock().unwrap();
+            tracker.flush_if_dirty()?;
 
-            // Save duration history
+            // Save duration history in a single batch operation
             let durations = self.duration_history.lock().unwrap();
-            for (node_id, duration_list) in durations.iter() {
-                storage.save_duration_history(node_id, duration_list)?;
-            }
+            let histories: Vec<(&str, &[u64])> = durations
+                .iter()
+                .map(|(id, d)| (id.as_str(), d.as_slice()))
+                .collect();
+            storage.save_duration_history_batch(&histories)?;
         }
         Ok(())
     }

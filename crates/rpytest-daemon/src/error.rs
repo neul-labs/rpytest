@@ -5,6 +5,10 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum DaemonError {
+    #[cfg(feature = "embedded-python")]
+    #[error("Python error: {0}")]
+    Python(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -58,3 +62,10 @@ pub enum DaemonError {
 }
 
 pub type Result<T> = std::result::Result<T, DaemonError>;
+
+#[cfg(feature = "embedded-python")]
+impl From<pyo3::PyErr> for DaemonError {
+    fn from(err: pyo3::PyErr) -> Self {
+        DaemonError::Python(err.to_string())
+    }
+}

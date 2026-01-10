@@ -8,10 +8,25 @@ description = "Pure Rust daemon for rpytest - handles test execution, collection
 name = "rpytest-daemon"
 path = "src/main.rs"
 
+[features]
+default = ["embedded-python"]
+embedded-python = ["dep:pyo3"]
+subprocess-only = []
+
 [dependencies]
 # Workspace dependencies
 rpytest-core = { path = "../rpytest-core" }
 rpytest-ipc = { path = "../rpytest-ipc" }
+
+# PyO3 for embedded Python execution (optional)
+# Uses abi3 stable ABI for Python 3.8+ compatibility
+pyo3 = { version = "0.22", features = ["auto-initialize", "abi3-py38"], optional = true }
+
+# Performance - custom allocator
+mimalloc = { version = "0.1", default-features = false }
+
+# CPU detection for adaptive batch sizing
+num_cpus = "1.16"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -61,6 +76,10 @@ ctrlc = "3"
 
 # UUID for context IDs
 uuid = { version = "1", features = ["v4"] }
+
+[build-dependencies]
+# PyO3 build config for conditional compilation
+pyo3-build-config = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

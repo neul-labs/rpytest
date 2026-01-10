@@ -1,5 +1,9 @@
 //! rpytest - Rust-powered, drop-in replacement for pytest.
 
+// Use mimalloc as the global allocator for better performance
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use rpytest_core::protocol::{Request, Response};
@@ -154,6 +158,7 @@ async fn handle_collect_only(cli: &Cli, root: &std::path::Path) -> Result<()> {
             protocol_version: rpytest_core::protocol::PROTOCOL_VERSION,
             repo_path,
             python_path: None,
+            execution_mode: Some(cli.execution_mode.clone()),
         })
         .await?;
 
@@ -341,6 +346,7 @@ async fn handle_inventory_status(cli: &Cli, root: &std::path::Path) -> Result<()
             protocol_version: rpytest_core::protocol::PROTOCOL_VERSION,
             repo_path,
             python_path: None,
+            execution_mode: Some(cli.execution_mode.clone()),
         })
         .await?;
 
@@ -542,6 +548,7 @@ async fn handle_run(cli: &Cli, root: &std::path::Path) -> Result<()> {
             protocol_version: rpytest_core::protocol::PROTOCOL_VERSION,
             repo_path,
             python_path: None,
+            execution_mode: Some(cli.execution_mode.clone()),
         })
         .await?;
 
@@ -1056,6 +1063,7 @@ async fn handle_watch(cli: &Cli, root: &std::path::Path) -> Result<()> {
             protocol_version: rpytest_core::protocol::PROTOCOL_VERSION,
             repo_path: repo_path.clone(),
             python_path: None,
+            execution_mode: Some(cli.execution_mode.clone()),
         })
         .await?;
 

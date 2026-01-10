@@ -195,8 +195,8 @@ impl DaemonManager {
         let child = cmd.spawn().context("Failed to spawn daemon process")?;
         info!("Daemon spawned with PID {}", child.id());
 
-        // Give the daemon a moment to start
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Give the daemon a moment to start (reduced from 200ms for performance)
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         Ok(())
     }

@@ -16,6 +16,9 @@ pub struct FlakinessTracker {
     max_outcomes: usize,
     /// Path to persist data
     storage_path: Option<PathBuf>,
+    /// Dirty flag for buffered writes
+    #[serde(skip)]
+    dirty: bool,
 }
 
 impl FlakinessTracker {
@@ -25,6 +28,7 @@ impl FlakinessTracker {
             records: HashMap::new(),
             max_outcomes: 20,
             storage_path,
+            dirty: false,
         };
 
         // Load from disk if path provided
@@ -91,10 +95,8 @@ impl FlakinessTracker {
             }
         }
 
-        // Auto-save
-        if let Some(ref _path) = self.storage_path {
-            let _ = self.save();
-        }
+        // Mark as dirty - caller should call flush_if_dirty() periodically
+        self.dirty = true;
     }
 
     /// Get flakiness record for a test.
@@ -194,6 +196,21 @@ impl FlakinessTracker {
             debug!("Saved {} flakiness records", self.records.len());
         }
         Ok(())
+    }
+
+    /// Flush to disk only if there are pending changes.
+    /// This is more efficient than calling save() after every record_outcome().
+    pub fn flush_if_dirty(&mut self) -> Result<()> {
+        if self.dirty {
+            self.save()?;
+            self.dirty = false;
+        }
+        Ok(())
+    }
+
+    /// Check if there are unsaved changes.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
     }
 
     /// Load from disk.

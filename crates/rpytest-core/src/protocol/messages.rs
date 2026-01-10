@@ -38,6 +38,9 @@ pub enum Request {
         repo_path: String,
         /// Optional path to Python interpreter.
         python_path: Option<String>,
+        /// Execution mode: "embedded", "subprocess", or "auto".
+        #[serde(default)]
+        execution_mode: Option<String>,
     },
 
     /// Collect tests for a repository context.
@@ -506,6 +509,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 repo_path: "/path/to/repo".to_string(),
                 python_path: Some("/usr/bin/python3".to_string()),
+                execution_mode: Some("auto".to_string()),
             },
             Request::Collect {
                 context_id: "ctx-123".to_string(),

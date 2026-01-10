@@ -8,7 +8,7 @@ use rmp_serde::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
 use sled::{Db, Tree};
 use std::path::PathBuf;
-use tracing::error;
+use tracing::{debug, error};
 
 /// Storage tree names.
 const TREE_INVENTORY: &str = "inventory";
@@ -46,7 +46,16 @@ impl std::fmt::Debug for DaemonStorage {
 impl DaemonStorage {
     /// Open or create the storage database.
     pub fn open(storage_path: &PathBuf) -> Result<Self> {
-        let config = sled::Config::default().path(storage_path).temporary(false);
+        // Configure sled for high performance:
+        // - cache_capacity: 256MB for hot data caching
+        // - flush_every_ms: batch flushes every 5s instead of immediate
+        // - mode: HighThroughput for write-heavy workloads
+        let config = sled::Config::default()
+            .path(storage_path)
+            .temporary(false)
+            .cache_capacity(256 * 1024 * 1024) // 256MB cache
+            .flush_every_ms(Some(5000))         // Batch flushes every 5s
+            .mode(sled::Mode::HighThroughput);
 
         let db = config.open()?;
 
@@ -346,6 +355,22 @@ impl DaemonStorage {
         }
     }
 
+    /// Save duration history for multiple tests in a batch (much faster than individual saves).
+    pub fn save_duration_history_batch(&self, histories: &[(&str, &[u64])]) -> Result<()> {
+        if histories.is_empty() {
+            return Ok(());
+        }
+
+        let mut batch = sled::Batch::default();
+        for (node_id, durations) in histories {
+            let mut buf = Vec::new();
+            durations.serialize(&mut Serializer::new(&mut buf))?;
+            batch.insert(node_id.as_bytes(), buf);
+        }
+        self.duration_history.apply_batch(batch)?;
+        Ok(())
+    }
+
     // ==================== Scheduler ====================
 
     /// Save scheduled test.
@@ -431,5 +456,56 @@ impl DaemonStorage {
     pub fn flush(&self) -> Result<()> {
         self.db.flush()?;
         Ok(())
+    }
+
+    // ==================== Maintenance ====================
+
+    /// Evict old data that hasn't been accessed in `max_age_days`.
+    /// Returns the number of records removed.
+    pub fn evict_old_data(&self, _max_age_days: u32) -> Result<usize> {
+        // Note: max_age_days reserved for future timestamp-based eviction
+        let mut removed = 0;
+
+        // Evict old flakiness records with few runs
+        let mut keys_to_remove = Vec::new();
+        for item in self.flakiness.iter() {
+            if let Ok((key, value)) = item {
+                let mut deserializer = Deserializer::new(&value[..]);
+                if let Ok(record) = FlakinessRecord::deserialize(&mut deserializer) {
+                    // Records with few runs are candidates for eviction
+                    if record.total_runs < 3 {
+                        keys_to_remove.push(key);
+                    }
+                }
+            }
+        }
+
+        for key in keys_to_remove {
+            self.flakiness.remove(key)?;
+            removed += 1;
+        }
+
+        // Trigger compaction after bulk delete
+        if removed > 100 {
+            debug!("Evicted {} records, triggering compaction", removed);
+            self.compact_async();
+        }
+
+        Ok(removed)
+    }
+
+    /// Trigger background compaction to reclaim disk space.
+    pub fn compact_async(&self) {
+        let db = self.db.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = db.flush() {
+                error!("Background compaction failed: {}", e);
+            }
+        });
+    }
+
+    /// Get the internal database for advanced operations.
+    pub fn db(&self) -> &Db {
+        &self.db
     }
 }

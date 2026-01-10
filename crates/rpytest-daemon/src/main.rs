@@ -1,5 +1,9 @@
 //! CLI entry point for the rpytest daemon.
 
+// Use mimalloc as the global allocator for better performance
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use rpytest_daemon::{DaemonError, DaemonServer};

@@ -251,6 +251,46 @@ pub struct ExecutorConfig {
     pub batch_size: usize,
 }
 
+/// Execution mode for running tests.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecutionMode {
+    /// Use embedded Python via PyO3 (fastest, requires embedded-python feature)
+    #[default]
+    Embedded,
+    /// Use subprocess execution (compatible with all Python environments)
+    Subprocess,
+    /// Use worker pool for parallel subprocess execution (best throughput)
+    Pooled,
+    /// Automatically select based on availability
+    Auto,
+}
+
+impl std::fmt::Display for ExecutionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExecutionMode::Embedded => write!(f, "embedded"),
+            ExecutionMode::Subprocess => write!(f, "subprocess"),
+            ExecutionMode::Pooled => write!(f, "pooled"),
+            ExecutionMode::Auto => write!(f, "auto"),
+        }
+    }
+}
+
+impl std::str::FromStr for ExecutionMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "embedded" => Ok(ExecutionMode::Embedded),
+            "subprocess" => Ok(ExecutionMode::Subprocess),
+            "pooled" => Ok(ExecutionMode::Pooled),
+            "auto" => Ok(ExecutionMode::Auto),
+            _ => Err(format!("Invalid execution mode: {}. Use 'embedded', 'subprocess', 'pooled', or 'auto'", s)),
+        }
+    }
+}
+
 /// Daemon runtime configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
@@ -259,6 +299,8 @@ pub struct DaemonConfig {
     pub python_path: Option<PathBuf>,
     pub idle_timeout_secs: u32,
     pub max_workers: u32,
+    /// Execution mode for running tests
+    pub execution_mode: ExecutionMode,
 }
 
 impl Default for DaemonConfig {
@@ -270,7 +312,75 @@ impl Default for DaemonConfig {
                 .join("rpytest"),
             python_path: None,
             idle_timeout_secs: 0,
-            max_workers: 4, // TODO: Use std::thread::available_parallelism() when stable
+            max_workers: 4,
+            execution_mode: ExecutionMode::Auto,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_execution_mode_from_str() {
+        assert_eq!(
+            "embedded".parse::<ExecutionMode>().unwrap(),
+            ExecutionMode::Embedded
+        );
+        assert_eq!(
+            "subprocess".parse::<ExecutionMode>().unwrap(),
+            ExecutionMode::Subprocess
+        );
+        assert_eq!(
+            "auto".parse::<ExecutionMode>().unwrap(),
+            ExecutionMode::Auto
+        );
+
+        // Case insensitive
+        assert_eq!(
+            "EMBEDDED".parse::<ExecutionMode>().unwrap(),
+            ExecutionMode::Embedded
+        );
+        assert_eq!(
+            "Auto".parse::<ExecutionMode>().unwrap(),
+            ExecutionMode::Auto
+        );
+
+        // Invalid
+        assert!("invalid".parse::<ExecutionMode>().is_err());
+    }
+
+    #[test]
+    fn test_execution_mode_display() {
+        assert_eq!(ExecutionMode::Embedded.to_string(), "embedded");
+        assert_eq!(ExecutionMode::Subprocess.to_string(), "subprocess");
+        assert_eq!(ExecutionMode::Auto.to_string(), "auto");
+    }
+
+    #[test]
+    fn test_execution_mode_default() {
+        assert_eq!(ExecutionMode::default(), ExecutionMode::Embedded);
+    }
+
+    #[test]
+    fn test_daemon_config_default() {
+        let config = DaemonConfig::default();
+        assert_eq!(config.execution_mode, ExecutionMode::Auto);
+        assert_eq!(config.max_workers, 4);
+    }
+
+    #[test]
+    fn test_test_outcome_conversions() {
+        assert_eq!(TestOutcome::from("passed"), TestOutcome::Passed);
+        assert_eq!(TestOutcome::from("failed"), TestOutcome::Failed);
+        assert_eq!(TestOutcome::from("skipped"), TestOutcome::Skipped);
+        assert_eq!(TestOutcome::from("error"), TestOutcome::Error);
+        assert_eq!(TestOutcome::from("xfail"), TestOutcome::Xfail);
+        assert_eq!(TestOutcome::from("xpass"), TestOutcome::Xpass);
+        assert_eq!(TestOutcome::from("unknown"), TestOutcome::Error);
+
+        assert_eq!(String::from(TestOutcome::Passed), "passed");
+        assert_eq!(String::from(TestOutcome::Failed), "failed");
     }
 }

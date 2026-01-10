@@ -1,0 +1,11 @@
+# Cargo build configuration for rpytest
+# Performance optimizations for release builds
+
+[build]
+# Use native CPU features for better optimization
+rustflags = ["-C", "target-cpu=native"]
+
+[alias]
+# Convenience aliases
+br = "build --release"
+brf = "build --profile release-fast"

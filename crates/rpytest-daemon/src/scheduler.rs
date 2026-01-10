@@ -118,6 +118,46 @@ impl TestScheduler {
         scheduled.into_iter().map(|s| s.node_id).collect()
     }
 
+    /// Split tests into N balanced batches using LPT (Longest Processing Time) algorithm.
+    ///
+    /// This distributes tests across workers to minimize total execution time by:
+    /// 1. Sorting tests by estimated duration (longest first)
+    /// 2. Greedily assigning each test to the batch with the lowest total duration
+    ///
+    /// Returns a vector of batches, where each batch is a vector of node IDs.
+    pub fn split_balanced(&self, node_ids: &[String], worker_count: usize) -> Vec<Vec<String>> {
+        if worker_count <= 1 || node_ids.is_empty() {
+            return vec![node_ids.to_vec()];
+        }
+
+        // Sort by duration descending
+        let mut sorted: Vec<_> = node_ids
+            .iter()
+            .map(|id| (id.clone(), self.get_estimated_duration(id)))
+            .collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+
+        // Greedy assignment to batch with lowest total duration
+        let mut batches: Vec<Vec<String>> = vec![Vec::new(); worker_count];
+        let mut batch_durations = vec![0u64; worker_count];
+
+        for (test, duration) in sorted {
+            // Find the batch with the minimum total duration
+            let min_idx = batch_durations
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, d)| *d)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+
+            batches[min_idx].push(test);
+            batch_durations[min_idx] += duration;
+        }
+
+        // Filter out empty batches
+        batches.into_iter().filter(|b| !b.is_empty()).collect()
+    }
+
     /// Clear duration history.
     pub fn clear_history(&mut self) {
         self.duration_history.clear();
@@ -176,5 +216,59 @@ mod tests {
         let duration = scheduler.get_estimated_duration("test_a");
         // Should be around 175 (weighted average favoring recent)
         assert!(duration >= 150 && duration <= 200);
+    }
+
+    #[test]
+    fn test_split_balanced_empty() {
+        let scheduler = TestScheduler::new();
+        let result = scheduler.split_balanced(&[], 4);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].is_empty());
+    }
+
+    #[test]
+    fn test_split_balanced_single_worker() {
+        let scheduler = TestScheduler::new();
+        let node_ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let result = scheduler.split_balanced(&node_ids, 1);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].len(), 3);
+    }
+
+    #[test]
+    fn test_split_balanced_even_distribution() {
+        let mut scheduler = TestScheduler::new();
+        // Create tests with known durations
+        scheduler.update_duration("slow", 1000);
+        scheduler.update_duration("medium1", 500);
+        scheduler.update_duration("medium2", 500);
+        scheduler.update_duration("fast1", 100);
+        scheduler.update_duration("fast2", 100);
+
+        let node_ids = vec![
+            "slow".to_string(),
+            "medium1".to_string(),
+            "medium2".to_string(),
+            "fast1".to_string(),
+            "fast2".to_string(),
+        ];
+
+        let batches = scheduler.split_balanced(&node_ids, 2);
+        assert_eq!(batches.len(), 2);
+
+        // Calculate total duration per batch
+        let batch1_duration: u64 = batches[0]
+            .iter()
+            .map(|id| scheduler.get_estimated_duration(id))
+            .sum();
+        let batch2_duration: u64 = batches[1]
+            .iter()
+            .map(|id| scheduler.get_estimated_duration(id))
+            .sum();
+
+        // Batches should be reasonably balanced (within 50% of each other)
+        let max_dur = batch1_duration.max(batch2_duration);
+        let min_dur = batch1_duration.min(batch2_duration);
+        assert!(max_dur <= min_dur * 2, "Batches not balanced: {} vs {}", batch1_duration, batch2_duration);
     }
 }

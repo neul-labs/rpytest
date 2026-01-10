@@ -233,6 +233,15 @@ pub struct Cli {
     #[arg(long = "daemon-storage", value_name = "DIR")]
     pub daemon_storage: Option<PathBuf>,
 
+    /// Execution mode for test runner (embedded=PyO3, subprocess=spawn python, pooled=warm workers, auto=try embedded first).
+    #[arg(
+        long = "execution-mode",
+        value_name = "MODE",
+        value_parser = ["embedded", "subprocess", "pooled", "auto"],
+        default_value = "auto"
+    )]
+    pub execution_mode: String,
+
     /// Clean up stale test contexts and caches.
     #[arg(long = "cleanup")]
     pub cleanup: bool,
@@ -438,6 +447,32 @@ mod tests {
 
         let cli = Cli::try_parse_from(["rpytest", "--verify-dropin"]).unwrap();
         assert!(cli.verify_dropin);
+    }
+
+    #[test]
+    fn parse_execution_mode() {
+        // Default is auto
+        let cli = Cli::try_parse_from(["rpytest"]).unwrap();
+        assert_eq!(cli.execution_mode, "auto");
+
+        // Embedded mode
+        let cli = Cli::try_parse_from(["rpytest", "--execution-mode", "embedded"]).unwrap();
+        assert_eq!(cli.execution_mode, "embedded");
+
+        // Subprocess mode
+        let cli = Cli::try_parse_from(["rpytest", "--execution-mode", "subprocess"]).unwrap();
+        assert_eq!(cli.execution_mode, "subprocess");
+
+        // Auto mode (explicit)
+        let cli = Cli::try_parse_from(["rpytest", "--execution-mode", "auto"]).unwrap();
+        assert_eq!(cli.execution_mode, "auto");
+    }
+
+    #[test]
+    fn parse_execution_mode_invalid() {
+        // Invalid mode should fail
+        let result = Cli::try_parse_from(["rpytest", "--execution-mode", "invalid"]);
+        assert!(result.is_err());
     }
 
     #[test]

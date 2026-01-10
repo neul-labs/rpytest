@@ -2,7 +2,7 @@
 
 use crate::context::RepoContext;
 use crate::error::{DaemonError, Result};
-use crate::models::{DaemonConfig, TestNode};
+use crate::models::{DaemonConfig, ExecutionMode, TestNode};
 use crate::storage::DaemonStorage;
 use nng::options::{Options, RecvTimeout};
 use nng::{Message, Protocol, Socket};
@@ -232,7 +232,8 @@ impl DaemonServer {
             Request::InitContext {
                 protocol_version,
                 repo_path,
-                python_path: _,
+                python_path,
+                execution_mode,
             } => {
                 // Check protocol version
                 if protocol_version != PROTOCOL_VERSION {
@@ -245,21 +246,73 @@ impl DaemonServer {
                     };
                 }
 
-                // Generate context ID
-                let context_id = Uuid::new_v4().to_string();
+                // Parse execution mode from request (default to Auto)
+                let mode = execution_mode
+                    .as_deref()
+                    .and_then(|s| s.parse::<ExecutionMode>().ok())
+                    .unwrap_or(ExecutionMode::Auto);
 
-                // Create context (native Rust collector only)
-                let context = RepoContext::new(
+                // Generate stable context ID based on repo_path and execution_mode
+                // This allows reusing contexts with warm workers across CLI invocations
+                let context_key = format!(
+                    "{}:{}:{}",
+                    repo_path,
+                    python_path.as_deref().unwrap_or("auto"),
+                    mode
+                );
+                use sha2::{Sha256, Digest};
+                let mut hasher = Sha256::new();
+                hasher.update(context_key.as_bytes());
+                let context_id = format!("ctx-{}", hex::encode(&hasher.finalize()[..8]));
+
+                // Check if context already exists
+                {
+                    let contexts_lock = contexts.lock();
+                    if let Some(existing_context) = contexts_lock.get(&context_id) {
+                        let context = existing_context.lock().await;
+                        let inventory_hash = context.inventory_hash.clone();
+                        let execution_mode = context.execution_mode;
+                        info!(
+                            "Reusing existing context {} with {} execution mode",
+                            context_id,
+                            execution_mode
+                        );
+                        return Response::ContextReady {
+                            protocol_version: PROTOCOL_VERSION,
+                            context_id,
+                            inventory_hash,
+                        };
+                    }
+                }
+
+                // Create context with the requested execution mode (async for pooled mode support)
+                let context = match RepoContext::new(
                     &context_id,
                     Path::new(&repo_path),
-                    None,
+                    python_path.map(std::path::PathBuf::from),
                     Some(storage.clone()),
-                );
+                    mode,
+                ).await {
+                    Ok(ctx) => ctx,
+                    Err(e) => {
+                        return Response::Error {
+                            code: ErrorCode::InternalError,
+                            message: format!("Failed to create context: {}", e),
+                        };
+                    }
+                };
                 let inventory_hash = context.inventory_hash.clone();
+                let execution_mode = context.execution_mode;
 
                 // Store context wrapped in Arc<tokio::sync::Mutex> for concurrent access
                 let mut contexts = contexts.lock();
                 contexts.insert(context_id.clone(), Arc::new(tokio::sync::Mutex::new(context)));
+
+                info!(
+                    "Created new context {} with {} execution mode",
+                    context_id,
+                    execution_mode
+                );
 
                 Response::ContextReady {
                     protocol_version: PROTOCOL_VERSION,
@@ -506,6 +559,7 @@ mod tests {
                     protocol_version: PROTOCOL_VERSION,
                     repo_path: repo_root.to_string_lossy().to_string(),
                     python_path: None,
+                    execution_mode: None,
                 },
                 &storage,
                 &contexts,

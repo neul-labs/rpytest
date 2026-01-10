@@ -13,6 +13,9 @@ path = "src/main.rs"
 [dependencies]
 rpytest-core = { workspace = true }
 rpytest-ipc = { workspace = true }
+
+# Performance - custom allocator
+mimalloc = { version = "0.1", default-features = false }
 clap = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

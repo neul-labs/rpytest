@@ -71,3 +71,17 @@ version = "3.1"
 
 [workspace.dependencies.tempfile]
 version = "3.13"
+
+# Optimized release profile
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# Fast release build (for CI or faster iteration)
+[profile.release-fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 4
