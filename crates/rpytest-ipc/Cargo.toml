@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+documentation.workspace = true
+homepage.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+keywords = ["pytest", "testing", "ipc"]
+categories = ["development-tools::testing"]
 description = "IPC transport layer for rpytest"
 
 [dependencies]
