@@ -1,6 +1,6 @@
 [package]
 name = "rpytest-daemon"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/neul-labs/rpytest"
@@ -23,8 +23,8 @@ subprocess-only = []
 
 [dependencies]
 # Workspace dependencies
-rpytest-core = { version = "0.1.0", path = "../rpytest-core" }
-rpytest-ipc = { version = "0.1.0", path = "../rpytest-ipc" }
+rpytest-core = { version = "0.1.1", path = "../rpytest-core" }
+rpytest-ipc = { version = "0.1.1", path = "../rpytest-ipc" }
 
 # PyO3 for embedded Python execution (optional)
 # Uses abi3 stable ABI for Python 3.8+ compatibility
