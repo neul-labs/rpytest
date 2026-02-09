@@ -7,8 +7,8 @@ rpytest is designed as a drop-in replacement for pytest. Most projects can switc
 ### Step 1: Install rpytest
 
 ```bash
-cargo install rpytest
-pip install rpytest-daemon
+cargo install rpytest rpytest-daemon
+pip install rpytest
 ```
 
 ### Step 2: Replace pytest with rpytest
@@ -217,7 +217,7 @@ rpytest tests/ -- --plugin-flag=value
 Ensure the daemon package is installed in the same environment:
 
 ```bash
-pip install rpytest-daemon
+pip install rpytest
 ```
 
 ### Collection Differences

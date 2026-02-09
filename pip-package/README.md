@@ -12,7 +12,7 @@ Or install from source:
 
 ```bash
 # Clone the repository
-git clone https://github.com/user/rpytest.git
+git clone https://github.com/neul-labs/rpytest.git
 cd rpytest
 
 # Build the Rust binary

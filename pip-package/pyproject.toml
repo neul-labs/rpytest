@@ -42,9 +42,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/user/rpytest"
-Repository = "https://github.com/user/rpytest"
-Issues = "https://github.com/user/rpytest/issues"
+Homepage = "https://github.com/neul-labs/rpytest"
+Repository = "https://github.com/neul-labs/rpytest"
+Issues = "https://github.com/neul-labs/rpytest/issues"
 
 [project.scripts]
 rpytest = "rpytest_cli:main"

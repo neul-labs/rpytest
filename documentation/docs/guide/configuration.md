@@ -268,7 +268,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -e .
-          pip install rpytest-daemon
+          pip install rpytest
 
       - name: Run tests
         run: rpytest tests/ -v --junitxml=report.xml
