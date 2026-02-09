@@ -102,12 +102,6 @@ pub struct RepoContext {
     pub last_collection_time: f64,
     /// Total runs
     total_runs: u32,
-    /// Whether we're in hybrid auto mode (embedded first, then pooled)
-    hybrid_auto_mode: bool,
-    /// Pending pooled executor being spawned in background
-    pending_pooled: Arc<tokio::sync::Mutex<Option<Box<dyn TestExecutor>>>>,
-    /// Whether pooled executor is ready
-    pooled_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RepoContext {
@@ -132,48 +126,32 @@ impl RepoContext {
 
         let flakiness_tracker = FlakinessTracker::new(Some(storage_path.join("flakiness.json")));
 
+        // Check RPYTEST_NO_POOL env var to disable pooled mode
+        let no_pool = std::env::var("RPYTEST_NO_POOL").map_or(false, |v| v == "1" || v == "true");
+
         // Create executor based on execution mode
-        // For Auto mode, use hybrid strategy: embedded first (fast cold start), then pooled (fast warm runs)
-        let (executor, actual_mode, hybrid_auto): (Box<dyn TestExecutor>, ExecutionMode, bool) = match execution_mode {
+        // Auto mode uses subprocess (safe isolation). Pooled is opt-in only via --execution-mode pooled.
+        let effective_mode = if no_pool && matches!(execution_mode, ExecutionMode::Pooled) {
+            info!("RPYTEST_NO_POOL is set, downgrading pooled to subprocess");
+            ExecutionMode::Subprocess
+        } else {
+            execution_mode
+        };
+
+        let (executor, actual_mode): (Box<dyn TestExecutor>, ExecutionMode) = match effective_mode {
             ExecutionMode::Pooled => {
                 // Pooled mode: create async worker pool with repo_path as working directory
                 let worker_count = num_cpus::get();
                 info!("Creating pooled executor with {} workers in {}", worker_count, repo_path.display());
                 let executor = create_pooled_executor(python_path.clone(), Some(worker_count), repo_path.to_path_buf()).await?;
-                (executor, ExecutionMode::Pooled, false)
+                (executor, ExecutionMode::Pooled)
             }
             ExecutionMode::Auto => {
-                // Hybrid auto mode: start with fastest available cold-start executor
-                // Will switch to pooled after first run for fast warm runs
-                #[cfg(feature = "embedded-python")]
-                {
-                    if crate::embedded::EmbeddedExecutor::is_available() {
-                        match crate::embedded::EmbeddedExecutor::new(Some(python_path.clone())) {
-                            Ok(executor) => {
-                                info!("Hybrid auto mode: starting with embedded executor (will switch to pooled after first run)");
-                                (Box::new(executor) as Box<dyn TestExecutor>, ExecutionMode::Embedded, true)
-                            }
-                            Err(e) => {
-                                info!("Embedded unavailable ({}), using subprocess with hybrid auto", e);
-                                let executor = create_executor(ExecutionMode::Subprocess, python_path.clone())?;
-                                // Still enable hybrid mode - will switch to pooled after first run
-                                (executor, ExecutionMode::Subprocess, true)
-                            }
-                        }
-                    } else {
-                        info!("Embedded Python not available, using subprocess with hybrid auto");
-                        let executor = create_executor(ExecutionMode::Subprocess, python_path.clone())?;
-                        // Still enable hybrid mode - will switch to pooled after first run
-                        (executor, ExecutionMode::Subprocess, true)
-                    }
-                }
-                #[cfg(not(feature = "embedded-python"))]
-                {
-                    info!("Embedded Python feature not enabled, using subprocess with hybrid auto");
-                    let executor = create_executor(ExecutionMode::Subprocess, python_path.clone())?;
-                    // Still enable hybrid mode - will switch to pooled after first run
-                    (executor, ExecutionMode::Subprocess, true)
-                }
+                // Auto mode: use subprocess for reliable test isolation
+                // Pooled mode is available via --execution-mode pooled for projects that support it
+                info!("Auto mode: using subprocess executor (use --execution-mode pooled for warm workers)");
+                let executor = create_executor(ExecutionMode::Subprocess, python_path.clone())?;
+                (executor, ExecutionMode::Subprocess)
             }
             other => {
                 // Other modes: use sync creation
@@ -183,15 +161,14 @@ impl RepoContext {
                     "pooled" => ExecutionMode::Pooled,
                     _ => ExecutionMode::Subprocess,
                 };
-                (executor, mode, false)
+                (executor, mode)
             }
         };
 
         info!(
-            "Created context {} with {} executor{}",
+            "Created context {} with {} executor",
             context_id,
             executor.execution_mode(),
-            if hybrid_auto { " (hybrid auto)" } else { "" }
         );
 
         Ok(RepoContext {
@@ -213,9 +190,6 @@ impl RepoContext {
             use_native: true,
             last_collection_time: 0.0,
             total_runs: 0,
-            hybrid_auto_mode: hybrid_auto,
-            pending_pooled: Arc::new(tokio::sync::Mutex::new(None)),
-            pooled_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -349,25 +323,6 @@ impl RepoContext {
     ) -> Result<RunSummary> {
         self.total_runs += 1;
 
-        // Hybrid auto mode: check if pooled executor is ready and switch to it
-        if self.hybrid_auto_mode {
-            let is_ready = self.pooled_ready.load(std::sync::atomic::Ordering::SeqCst);
-            info!("Hybrid auto: run {}, pooled_ready={}, current_mode={}", self.total_runs, is_ready, self.execution_mode);
-
-            if is_ready {
-                let mut pending = self.pending_pooled.lock().await;
-                if let Some(pooled_executor) = pending.take() {
-                    info!("Hybrid auto: switching to pooled executor for faster warm runs");
-                    let mut executor = self.executor.lock();
-                    *executor = pooled_executor;
-                    self.execution_mode = ExecutionMode::Pooled;
-                    self.hybrid_auto_mode = false; // Don't check again after switching
-                } else {
-                    info!("Hybrid auto: pooled_ready was true but executor was None");
-                }
-            }
-        }
-
         // Configure executor
         let mut config = ExecutorConfig::new();
         config.workers = workers;
@@ -425,32 +380,6 @@ impl RepoContext {
             let executor = executor.lock();
             executor.run_tests(&runnable_node_ids).await
         };
-
-        // Hybrid auto mode: after first run, spawn pooled workers in background
-        if self.hybrid_auto_mode && self.total_runs == 1 && !self.pooled_ready.load(std::sync::atomic::Ordering::SeqCst) {
-            let pending_pooled = self.pending_pooled.clone();
-            let pooled_ready = self.pooled_ready.clone();
-            let python_path = self.python_path.clone();
-            let repo_path = self.repo_path.clone();
-            let worker_count = num_cpus::get();
-
-            info!("Hybrid auto: spawning {} pooled workers in background for next run", worker_count);
-            tokio::spawn(async move {
-                info!("Hybrid auto: background task started, creating pooled executor...");
-                match create_pooled_executor(python_path, Some(worker_count), repo_path).await {
-                    Ok(executor) => {
-                        info!("Hybrid auto: pooled executor created, storing...");
-                        let mut pending = pending_pooled.lock().await;
-                        *pending = Some(executor);
-                        pooled_ready.store(true, std::sync::atomic::Ordering::SeqCst);
-                        info!("Hybrid auto: pooled executor ready (pooled_ready=true)");
-                    }
-                    Err(e) => {
-                        warn!("Hybrid auto: failed to create pooled executor: {}", e);
-                    }
-                }
-            });
-        }
 
         // Process results
         let mut passed = 0;
