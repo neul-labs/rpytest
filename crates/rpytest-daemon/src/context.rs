@@ -147,24 +147,43 @@ impl RepoContext {
                 // Will switch to pooled after first run for fast warm runs
                 #[cfg(feature = "embedded-python")]
                 {
-                    if crate::embedded::EmbeddedExecutor::is_available() {
-                        match crate::embedded::EmbeddedExecutor::new(Some(python_path.clone())) {
-                            Ok(executor) => {
-                                info!("Hybrid auto mode: starting with embedded executor (will switch to pooled after first run)");
-                                (Box::new(executor) as Box<dyn TestExecutor>, ExecutionMode::Embedded, true)
+                    // Probe embedded Python with a timeout to avoid hanging
+                    // if the interpreter can't initialize (e.g., missing stdlib).
+                    let embedded_available = {
+                        let python_path_clone = python_path.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if !crate::embedded::EmbeddedExecutor::is_available() {
+                                return Err("is_available() returned false".to_string());
                             }
-                            Err(e) => {
-                                info!("Embedded unavailable ({}), using subprocess with hybrid auto", e);
-                                let executor = create_executor(ExecutionMode::Subprocess, python_path.clone())?;
-                                // Still enable hybrid mode - will switch to pooled after first run
-                                (executor, ExecutionMode::Subprocess, true)
-                            }
+                            crate::embedded::EmbeddedExecutor::new(Some(python_path_clone))
+                                .map_err(|e| format!("{}", e))
+                        })
+                    };
+
+                    // Give embedded init at most 5 seconds before falling back
+                    match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        embedded_available,
+                    ).await {
+                        Ok(Ok(Ok(executor))) => {
+                            info!("Hybrid auto mode: starting with embedded executor (will switch to pooled after first run)");
+                            (Box::new(executor) as Box<dyn TestExecutor>, ExecutionMode::Embedded, true)
                         }
-                    } else {
-                        info!("Embedded Python not available, using subprocess with hybrid auto");
-                        let executor = create_executor(ExecutionMode::Subprocess, python_path.clone())?;
-                        // Still enable hybrid mode - will switch to pooled after first run
-                        (executor, ExecutionMode::Subprocess, true)
+                        Ok(Ok(Err(e))) => {
+                            info!("Embedded unavailable ({}), using subprocess with hybrid auto", e);
+                            let executor = create_executor(ExecutionMode::Subprocess, python_path.clone())?;
+                            (executor, ExecutionMode::Subprocess, true)
+                        }
+                        Ok(Err(e)) => {
+                            info!("Embedded init panicked ({}), using subprocess with hybrid auto", e);
+                            let executor = create_executor(ExecutionMode::Subprocess, python_path.clone())?;
+                            (executor, ExecutionMode::Subprocess, true)
+                        }
+                        Err(_) => {
+                            warn!("Embedded Python init timed out after 5s, falling back to subprocess immediately");
+                            let executor = create_executor(ExecutionMode::Subprocess, python_path.clone())?;
+                            (executor, ExecutionMode::Subprocess, true)
+                        }
                     }
                 }
                 #[cfg(not(feature = "embedded-python"))]

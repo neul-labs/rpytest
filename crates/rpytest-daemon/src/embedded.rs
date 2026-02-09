@@ -22,6 +22,70 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use tracing::{debug, info, warn};
 
+/// Ensure PYTHONHOME is set before PyO3 initializes the interpreter.
+///
+/// Without PYTHONHOME, the embedded Python interpreter cannot find the standard
+/// library (e.g., `encodings` module), causing a fatal error:
+///   "Fatal Python error: Failed to import encodings module"
+///
+/// This function detects the correct prefix by running the system `python3`.
+fn ensure_pythonhome() {
+    if std::env::var("PYTHONHOME").is_ok() {
+        debug!("PYTHONHOME already set");
+        return;
+    }
+
+    // Try to detect from VIRTUAL_ENV first (resolve to base_prefix)
+    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+        // In a virtualenv, we need the base prefix (the actual Python installation),
+        // not the virtualenv prefix itself.
+        let python = std::path::Path::new(&venv).join("bin").join("python3");
+        if python.exists() {
+            if let Some(base_prefix) = query_python_base_prefix(&python) {
+                info!("Auto-detected PYTHONHOME from VIRTUAL_ENV's base_prefix: {}", base_prefix);
+                std::env::set_var("PYTHONHOME", &base_prefix);
+                return;
+            }
+        }
+    }
+
+    // Fall back to system python3
+    if let Some(base_prefix) = query_python_base_prefix(std::path::Path::new("python3")) {
+        info!("Auto-detected PYTHONHOME from python3: {}", base_prefix);
+        std::env::set_var("PYTHONHOME", &base_prefix);
+        return;
+    }
+
+    warn!("Could not auto-detect PYTHONHOME; embedded Python may fail to initialize");
+}
+
+/// Run `python3 -c "import sys; print(sys.base_prefix)"` and return the output.
+fn query_python_base_prefix(python: &std::path::Path) -> Option<String> {
+    match std::process::Command::new(python)
+        .args(["-c", "import sys; print(sys.base_prefix)"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !prefix.is_empty() {
+                Some(prefix)
+            } else {
+                None
+            }
+        }
+        Ok(_) => {
+            debug!("python3 exited with non-zero status while querying base_prefix");
+            None
+        }
+        Err(e) => {
+            debug!("Failed to run python3 for base_prefix detection: {}", e);
+            None
+        }
+    }
+}
+
 /// Global cache for compiled plugin class - avoids recompiling Python on every run
 static CACHED_PLUGIN_CLASS: OnceLock<Py<PyAny>> = OnceLock::new();
 
@@ -230,6 +294,10 @@ pub struct EmbeddedExecutor {
 impl EmbeddedExecutor {
     /// Create a new embedded executor with optional python_path for virtualenv support.
     pub fn new(python_path: Option<PathBuf>) -> Result<Self> {
+        // MUST happen before any Python::with_gil() call, otherwise the
+        // interpreter can't find the stdlib and aborts with a fatal error.
+        ensure_pythonhome();
+
         let mut executor = EmbeddedExecutor {
             config: EmbeddedExecutorConfig::default(),
             initialized: false,
@@ -627,15 +695,27 @@ impl EmbeddedExecutor {
 
     /// Check if embedded Python is available and working.
     pub fn is_available() -> bool {
-        Python::with_gil(|py| {
-            // Check Python version
-            let version = py.version_info();
-            if version.major < 3 || (version.major == 3 && version.minor < 8) {
-                return false;
-            }
+        // Ensure PYTHONHOME is set before touching the interpreter.
+        ensure_pythonhome();
 
-            // Check pytest is importable
-            py.import_bound("pytest").is_ok()
+        // Use catch_unwind to prevent a fatal Python init error from
+        // crashing the entire daemon; instead we return false and let
+        // the caller fall back to subprocess mode.
+        std::panic::catch_unwind(|| {
+            Python::with_gil(|py| {
+                // Check Python version
+                let version = py.version_info();
+                if version.major < 3 || (version.major == 3 && version.minor < 8) {
+                    return false;
+                }
+
+                // Check pytest is importable
+                py.import_bound("pytest").is_ok()
+            })
+        })
+        .unwrap_or_else(|_| {
+            warn!("Embedded Python initialization panicked; falling back to subprocess mode");
+            false
         })
     }
 }
