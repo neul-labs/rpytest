@@ -29,13 +29,18 @@ The speed comes from a persistent daemon that keeps Python warm between runs. No
 # Via pip (recommended)
 pip install rpytest
 
-# Via cargo
-cargo install rpytest
+# Via cargo (installs both the CLI and the daemon)
+cargo install rpytest rpytest-daemon
 
 # From source
 git clone https://github.com/neul-labs/rpytest.git
-cd rpytest && cargo install --path crates/rpytest
+cd rpytest
+cargo install --path crates/rpytest
+cargo install --path crates/rpytest-daemon
 ```
+
+> **Note:** rpytest requires the `rpytest-daemon` binary to function. Both packages
+> must be installed when using `cargo install`.
 
 ## Usage
 

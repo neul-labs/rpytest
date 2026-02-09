@@ -11,15 +11,19 @@
 The recommended way to install rpytest:
 
 ```bash
-cargo install rpytest
+cargo install rpytest rpytest-daemon
 ```
+
+!!! important
+    Both the `rpytest` CLI and the `rpytest-daemon` binary must be installed.
+    Without the daemon, rpytest cannot execute tests.
 
 ## Install from Source
 
 Clone and build:
 
 ```bash
-git clone https://github.com/user/rpytest.git
+git clone https://github.com/neul-labs/rpytest.git
 cd rpytest
 cargo build --release
 
@@ -29,17 +33,17 @@ export PATH="$PWD/target/release:$PATH"
 
 ## Python Dependencies
 
-rpytest requires the Python daemon package to be installed in your project's virtual environment:
+rpytest requires the Python package to be installed in your project's virtual environment:
 
 ```bash
 # Using pip
-pip install rpytest-daemon
+pip install rpytest
 
 # Using uv
-uv pip install rpytest-daemon
+uv pip install rpytest
 
 # Or install from source
-cd daemon/
+cd pip-package/
 pip install -e .
 ```
 
@@ -68,7 +72,7 @@ rpytest automatically detects your Python environment in this order:
 
     ```bash
     uv venv
-    uv pip install rpytest-daemon pytest
+    uv pip install rpytest pytest
     rpytest tests/
     ```
 
