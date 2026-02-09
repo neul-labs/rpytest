@@ -1,0 +1,5 @@
+[console_scripts]
+rpytest = rpytest_cli:main
+
+[pytest11]
+rpytest = rpytest_cli.plugin

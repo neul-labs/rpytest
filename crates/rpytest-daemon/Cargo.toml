@@ -1,12 +1,13 @@
 [package]
 name = "rpytest-daemon"
-version = "0.1.1"
-edition = "2021"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/neul-labs/rpytest"
-documentation = "https://docs.neullabs.com/rpytest"
-homepage = "https://github.com/neul-labs/rpytest"
-authors = ["neul-labs"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
+homepage.workspace = true
+authors.workspace = true
 readme = "../../README.md"
 keywords = ["pytest", "testing", "python", "daemon"]
 categories = ["development-tools::testing"]
