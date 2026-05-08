@@ -1,7 +1,7 @@
 site_name: rpytest
 site_description: Rust-powered, drop-in replacement for pytest
 site_url: https://rpytest.dev
-repo_url: https://github.com/user/rpytest
+repo_url: https://github.com/neul-labs/rpytest
 repo_name: rpytest
 
 theme:
@@ -85,4 +85,4 @@ nav:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/user/rpytest
+      link: https://github.com/neul-labs/rpytest

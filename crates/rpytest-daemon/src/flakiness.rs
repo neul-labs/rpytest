@@ -1,11 +1,115 @@
-//! Flakiness detection and tracking.
+//! Flakiness detection and tracking with explicit stability state machine.
 
 use crate::error::Result;
-use crate::models::{FlakinessRecord, TestOutcome};
+use crate::models::{FlakinessRecord, StabilityState, TestOutcome};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::debug;
+
+impl StabilityState {
+    /// Apply an outcome and return the new state.
+    ///
+    /// The `prev_outcome` is the most recent previous outcome (if any).
+    pub fn transition(
+        self, outcome: &TestOutcome, prev_outcome: Option<&TestOutcome>) -> Self {
+        match self {
+            StabilityState::Unknown => match outcome {
+                TestOutcome::Passed => StabilityState::Stable {
+                    consecutive_passes: 1,
+                },
+                TestOutcome::Failed | TestOutcome::Error => StabilityState::Unstable {
+                    consecutive_failures: 1,
+                },
+                // Skipped, xfail, xpass don't contribute to stability tracking
+                _ => StabilityState::Unknown,
+            },
+            StabilityState::Stable { consecutive_passes } => match outcome {
+                TestOutcome::Passed => StabilityState::Stable {
+                    consecutive_passes: consecutive_passes + 1,
+                },
+                TestOutcome::Failed | TestOutcome::Error => {
+                    // First failure after stable streak: enter flaky
+                    StabilityState::Flaky { streak_count: 1 }
+                }
+                _ => StabilityState::Unknown,
+            },
+            StabilityState::Unstable { consecutive_failures } => match outcome {
+                TestOutcome::Passed => {
+                    // First pass after unstable streak: enter flaky
+                    StabilityState::Flaky { streak_count: 1 }
+                }
+                TestOutcome::Failed | TestOutcome::Error => StabilityState::Unstable {
+                    consecutive_failures: consecutive_failures + 1,
+                },
+                _ => StabilityState::Unknown,
+            },
+            StabilityState::Flaky { streak_count } => {
+                // Determine if this outcome is a flip from the previous
+                let is_flip = prev_outcome.map_or(false, |prev| {
+                    let prev_is_fail = matches!(prev, TestOutcome::Failed | TestOutcome::Error);
+                    let curr_is_fail = matches!(outcome, TestOutcome::Failed | TestOutcome::Error);
+                    prev_is_fail != curr_is_fail
+                });
+
+                if is_flip {
+                    let new_streak = streak_count + 1;
+                    if new_streak >= 3 {
+                        // Promote to confirmed flaky after 3+ flips
+                        StabilityState::ConfirmedFlaky
+                    } else {
+                        StabilityState::Flaky {
+                            streak_count: new_streak,
+                        }
+                    }
+                } else {
+                    // No flip: transition to stable or unstable based on current outcome
+                    match outcome {
+                        TestOutcome::Passed => StabilityState::Stable {
+                            consecutive_passes: 1,
+                        },
+                        TestOutcome::Failed | TestOutcome::Error => StabilityState::Unstable {
+                            consecutive_failures: 1,
+                        },
+                        _ => StabilityState::Unknown,
+                    }
+                }
+            }
+            StabilityState::ConfirmedFlaky => {
+                // Once confirmed flaky, stay confirmed unless we see a long stable streak
+                match outcome {
+                    TestOutcome::Passed => {
+                        // Check if previous was also passed (no flip)
+                        let prev_was_pass = prev_outcome.map_or(false, |prev| {
+                            matches!(prev, TestOutcome::Passed)
+                        });
+                        if prev_was_pass {
+                            // Start counting stable streak
+                            StabilityState::Stable {
+                                consecutive_passes: 2, // this pass + previous pass
+                            }
+                        } else {
+                            StabilityState::ConfirmedFlaky
+                        }
+                    }
+                    TestOutcome::Failed | TestOutcome::Error => {
+                        let prev_was_fail = prev_outcome.map_or(false, |prev| {
+                            matches!(prev, TestOutcome::Failed | TestOutcome::Error)
+                        });
+                        if prev_was_fail {
+                            StabilityState::Unstable {
+                                consecutive_failures: 2,
+                            }
+                        } else {
+                            StabilityState::ConfirmedFlaky
+                        }
+                    }
+                    _ => StabilityState::ConfirmedFlaky,
+                }
+            }
+        }
+    }
+}
 
 /// Tracks test flakiness and manages auto-reruns.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -42,7 +146,14 @@ impl FlakinessTracker {
     }
 
     /// Record a test outcome and update statistics.
-    pub fn record_outcome(&mut self, node_id: &str, outcome: TestOutcome, message: Option<&str>) {
+    ///
+    /// Updates the stability state machine for the test.
+    pub fn record_outcome(
+        &mut self,
+        node_id: &str,
+        outcome: TestOutcome,
+        message: Option<&str>,
+    ) {
         let record = self
             .records
             .entry(node_id.to_string())
@@ -54,6 +165,7 @@ impl FlakinessTracker {
                 flaky_streak: 0,
                 total_runs: 0,
                 last_failure_message: None,
+                stability: StabilityState::Unknown,
             });
 
         let prev_outcome = record.outcomes.last().cloned();
@@ -67,7 +179,24 @@ impl FlakinessTracker {
 
         record.total_runs += 1;
 
-        // Update consecutive counters
+        // Update stability state machine
+        let prev_for_transition = prev_outcome.as_ref().and_then(|s| match s.as_str() {
+            "passed" => Some(TestOutcome::Passed),
+            "failed" => Some(TestOutcome::Failed),
+            "error" => Some(TestOutcome::Error),
+            "skipped" => Some(TestOutcome::Skipped),
+            "xfail" => Some(TestOutcome::Xfail),
+            "xpass" => Some(TestOutcome::Xpass),
+            _ => None,
+        });
+
+        let old_stability = std::mem::replace(
+            &mut record.stability,
+            StabilityState::Unknown, // temporary placeholder
+        );
+        record.stability = old_stability.transition(&outcome, prev_for_transition.as_ref());
+
+        // Update legacy counters for backward compatibility with serialization
         match outcome {
             TestOutcome::Failed | TestOutcome::Error => {
                 record.consecutive_failures += 1;
@@ -85,8 +214,8 @@ impl FlakinessTracker {
             }
         }
 
-        // Track flaky streaks (outcome flips)
-        if let Some(prev) = prev_outcome {
+        // Track flaky streaks (outcome flips) for backward compatibility
+        if let Some(ref prev) = prev_outcome {
             let prev_str = prev.as_str();
             let prev_is_fail = prev_str == "failed" || prev_str == "error";
             let curr_is_fail = matches!(outcome, TestOutcome::Failed | TestOutcome::Error);
@@ -106,14 +235,19 @@ impl FlakinessTracker {
 
     /// Check if a test is considered flaky.
     pub fn is_flaky(&self, node_id: &str) -> bool {
-        if let Some(record) = self.records.get(node_id) {
-            Self::check_is_flaky(record)
-        } else {
-            false
-        }
+        self.records
+            .get(node_id)
+            .map_or(false, |r| r.stability.is_flaky())
     }
 
-    /// Internal check for flakiness based on record.
+    /// Get the stability state for a test.
+    pub fn stability_state(&self, node_id: &str) -> StabilityState {
+        self.records
+            .get(node_id)
+            .map_or(StabilityState::Unknown, |r| r.stability.clone())
+    }
+
+    /// Internal check for flakiness based on record (legacy heuristic).
     fn check_is_flaky(record: &FlakinessRecord) -> bool {
         if record.outcomes.len() < 3 {
             return false;
@@ -147,7 +281,7 @@ impl FlakinessTracker {
     pub fn get_flaky_tests(&self) -> Vec<&FlakinessRecord> {
         self.records
             .values()
-            .filter(|r| Self::check_is_flaky(r))
+            .filter(|r| r.stability.is_flaky())
             .collect()
     }
 
@@ -160,7 +294,7 @@ impl FlakinessTracker {
                     .outcomes
                     .iter()
                     .any(|o| o.as_str() == "failed" || o.as_str() == "error");
-                has_fail && !Self::check_is_flaky(r)
+                has_fail && !r.stability.is_flaky()
             })
             .collect()
     }
@@ -170,7 +304,7 @@ impl FlakinessTracker {
         self.records
             .values()
             .filter(|r| {
-                !Self::check_is_flaky(r)
+                !r.stability.is_flaky()
                     && !r
                         .outcomes
                         .iter()
@@ -245,6 +379,52 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn test_stability_state_transitions() {
+        // Unknown -> Stable
+        let state = StabilityState::Unknown.transition(&TestOutcome::Passed, None);
+        assert!(matches!(state, StabilityState::Stable { consecutive_passes: 1 }));
+
+        // Unknown -> Unstable
+        let state = StabilityState::Unknown.transition(&TestOutcome::Failed, None);
+        assert!(matches!(state, StabilityState::Unstable { consecutive_failures: 1 }));
+
+        // Stable -> Flaky (first failure)
+        let state = StabilityState::Stable { consecutive_passes: 3 }
+            .transition(&TestOutcome::Failed, Some(&TestOutcome::Passed));
+        assert!(matches!(state, StabilityState::Flaky { streak_count: 1 }));
+
+        // Unstable -> Flaky (first pass)
+        let state = StabilityState::Unstable { consecutive_failures: 2 }
+            .transition(&TestOutcome::Passed, Some(&TestOutcome::Failed));
+        assert!(matches!(state, StabilityState::Flaky { streak_count: 1 }));
+
+        // Flaky with flip -> Flaky (streak increases)
+        let state = StabilityState::Flaky { streak_count: 1 }
+            .transition(&TestOutcome::Failed, Some(&TestOutcome::Passed));
+        assert!(matches!(state, StabilityState::Flaky { streak_count: 2 }));
+
+        // Flaky with enough flips -> ConfirmedFlaky
+        let state = StabilityState::Flaky { streak_count: 2 }
+            .transition(&TestOutcome::Passed, Some(&TestOutcome::Failed));
+        assert!(matches!(state, StabilityState::ConfirmedFlaky));
+
+        // Flaky without flip -> Stable
+        let state = StabilityState::Flaky { streak_count: 1 }
+            .transition(&TestOutcome::Passed, Some(&TestOutcome::Passed));
+        assert!(matches!(state, StabilityState::Stable { consecutive_passes: 1 }));
+
+        // Flaky without flip -> Unstable
+        let state = StabilityState::Flaky { streak_count: 1 }
+            .transition(&TestOutcome::Failed, Some(&TestOutcome::Failed));
+        assert!(matches!(state, StabilityState::Unstable { consecutive_failures: 1 }));
+
+        // Skipped resets to Unknown
+        let state = StabilityState::Stable { consecutive_passes: 5 }
+            .transition(&TestOutcome::Skipped, Some(&TestOutcome::Passed));
+        assert!(matches!(state, StabilityState::Unknown));
+    }
+
+    #[test]
     fn test_record_outcome() {
         let dir = TempDir::new().unwrap();
         let storage_path = dir.path().join("flakiness.json");
@@ -254,7 +434,10 @@ mod tests {
         tracker.record_outcome("test_a", TestOutcome::Failed, Some("error"));
 
         assert_eq!(tracker.total_tracked(), 1);
-        assert!(!tracker.is_flaky("test_a")); // Need more outcomes
+        assert!(!tracker.is_flaky("test_a")); // Need more outcomes for flaky state
+
+        let state = tracker.stability_state("test_a");
+        assert!(matches!(state, StabilityState::Flaky { streak_count: 1 }));
     }
 
     #[test]
@@ -272,6 +455,9 @@ mod tests {
 
         assert!(tracker.is_flaky("test_a"));
         assert_eq!(tracker.get_failure_rate("test_a"), 0.4);
+
+        let state = tracker.stability_state("test_a");
+        assert!(matches!(state, StabilityState::ConfirmedFlaky));
     }
 
     #[test]
@@ -290,5 +476,54 @@ mod tests {
         let flaky = tracker.get_flaky_tests();
         assert_eq!(flaky.len(), 1);
         assert_eq!(flaky[0].node_id, "test_flaky");
+        assert!(flaky[0].stability.is_flaky());
+    }
+
+    #[test]
+    fn test_confirmed_flaky_recovery() {
+        let dir = TempDir::new().unwrap();
+        let storage_path = dir.path().join("flakiness.json");
+        let mut tracker = FlakinessTracker::new(Some(storage_path));
+
+        // Make test confirmed flaky
+        tracker.record_outcome("test_recover", TestOutcome::Passed, None);
+        tracker.record_outcome("test_recover", TestOutcome::Failed, None);
+        tracker.record_outcome("test_recover", TestOutcome::Passed, None);
+        tracker.record_outcome("test_recover", TestOutcome::Failed, None);
+        tracker.record_outcome("test_recover", TestOutcome::Passed, None);
+
+        assert!(tracker.is_flaky("test_recover"));
+        let state = tracker.stability_state("test_recover");
+        assert!(matches!(state, StabilityState::ConfirmedFlaky));
+
+        // Now pass consistently - should eventually become stable
+        tracker.record_outcome("test_recover", TestOutcome::Passed, None);
+        tracker.record_outcome("test_recover", TestOutcome::Passed, None);
+        tracker.record_outcome("test_recover", TestOutcome::Passed, None);
+
+        let state = tracker.stability_state("test_recover");
+        assert!(matches!(state, StabilityState::Stable { consecutive_passes: 4 }));
+        assert!(!tracker.is_flaky("test_recover"));
+    }
+
+    #[test]
+    fn test_stable_count() {
+        let dir = TempDir::new().unwrap();
+        let storage_path = dir.path().join("flakiness.json");
+        let mut tracker = FlakinessTracker::new(Some(storage_path));
+
+        tracker.record_outcome("stable1", TestOutcome::Passed, None);
+        tracker.record_outcome("stable1", TestOutcome::Passed, None);
+
+        tracker.record_outcome("flaky1", TestOutcome::Passed, None);
+        tracker.record_outcome("flaky1", TestOutcome::Failed, None);
+        tracker.record_outcome("flaky1", TestOutcome::Passed, None);
+
+        tracker.record_outcome("unstable1", TestOutcome::Failed, None);
+        tracker.record_outcome("unstable1", TestOutcome::Failed, None);
+
+        assert_eq!(tracker.stable_count(), 1);
+        assert_eq!(tracker.get_flaky_tests().len(), 1);
+        assert_eq!(tracker.get_unstable_tests().len(), 1);
     }
 }

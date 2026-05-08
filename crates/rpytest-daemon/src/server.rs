@@ -271,7 +271,7 @@ impl DaemonServer {
                     if let Some(existing_context) = contexts_lock.get(&context_id) {
                         let context = existing_context.lock().await;
                         let inventory_hash = context.inventory_hash.clone();
-                        let execution_mode = context.execution_mode;
+                        let execution_mode = context.execution_mode();
                         info!(
                             "Reusing existing context {} with {} execution mode",
                             context_id,
@@ -302,7 +302,7 @@ impl DaemonServer {
                     }
                 };
                 let inventory_hash = context.inventory_hash.clone();
-                let execution_mode = context.execution_mode;
+                let execution_mode = context.execution_mode();
 
                 // Store context wrapped in Arc<tokio::sync::Mutex> for concurrent access
                 let mut contexts = contexts.lock();
@@ -559,7 +559,7 @@ mod tests {
                     protocol_version: PROTOCOL_VERSION,
                     repo_path: repo_root.to_string_lossy().to_string(),
                     python_path: None,
-                    execution_mode: None,
+                    execution_mode: Some("subprocess".to_string()),
                 },
                 &storage,
                 &contexts,

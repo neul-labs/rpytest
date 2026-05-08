@@ -19,7 +19,7 @@ cargo install rpytest
 Clone and build:
 
 ```bash
-git clone https://github.com/user/rpytest.git
+git clone https://github.com/neul-labs/rpytest.git
 cd rpytest
 cargo build --release
 
@@ -39,7 +39,7 @@ pip install rpytest-daemon
 uv pip install rpytest-daemon
 
 # Or install from source
-cd daemon/
+cd pip-package/
 pip install -e .
 ```
 

@@ -10,8 +10,8 @@ import urllib.request
 from pathlib import Path
 
 # GitHub release URL pattern
-RELEASE_URL = "https://github.com/user/rpytest/releases/download"
-VERSION = "0.1.0"
+RELEASE_URL = "https://github.com/neul-labs/rpytest/releases/download"
+VERSION = "0.1.2"
 
 
 def get_platform_target() -> str:

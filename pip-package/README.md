@@ -12,7 +12,7 @@ Or install from source:
 
 ```bash
 # Clone the repository
-git clone https://github.com/user/rpytest.git
+git clone https://github.com/neul-labs/rpytest.git
 cd rpytest
 
 # Build the Rust binary
@@ -76,4 +76,4 @@ reruns_delay = 1.0
 
 ## License
 
-MIT OR Apache-2.0
+MIT

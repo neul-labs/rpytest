@@ -3,7 +3,7 @@
 This package provides the rpytest CLI tool and pytest plugin.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.2"
 
 import os
 import platform

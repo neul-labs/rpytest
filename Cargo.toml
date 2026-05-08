@@ -8,10 +8,10 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 rust-version = "1.75"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/neul-labs/rpytest"
 documentation = "https://docs.neullabs.com/rpytest"
 homepage = "https://github.com/neul-labs/rpytest"
@@ -62,8 +62,8 @@ libc = "0.2"
 regex-lite = "0.1"
 
 # Internal crates
-rpytest-core = { version = "0.1.1", path = "crates/rpytest-core" }
-rpytest-ipc = { version = "0.1.1", path = "crates/rpytest-ipc" }
+rpytest-core = { version = "0.1.2", path = "crates/rpytest-core" }
+rpytest-ipc = { version = "0.1.2", path = "crates/rpytest-ipc" }
 
 [workspace.dependencies.assert_cmd]
 version = "2.0"

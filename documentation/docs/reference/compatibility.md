@@ -299,7 +299,7 @@ If you find compatibility issues:
 
 1. Check this document for known differences
 2. Try with pytest to confirm different behavior
-3. Report at https://github.com/anthropics/rpytest/issues
+3. Report at https://github.com/neul-labs/rpytest/issues
 
 Include:
 - pytest version

@@ -2,6 +2,29 @@
 
 All notable changes to rpytest are documented here.
 
+## [0.1.2] - 2026-05-07
+
+### Added
+
+- **State Machine Architecture**
+  - Explicit `WorkerState` in worker pool (Spawning → Ready → Busy → Recycling → Dead)
+  - Explicit `ExecutionState` for hybrid auto mode (ColdStart → Warming → Warm)
+  - Explicit `WatchState` for watch mode (Idle → Debouncing → ComputingAffected → Recollecting → Running)
+  - Explicit `StabilityState` for flakiness tracking (Unknown → Stable → Unstable → Flaky → ConfirmedFlaky)
+  - Explicit `LifecycleManager` for daemon lifecycle with event-driven transitions
+
+- **Distribution**
+  - npm package (`npm install -g rpytest`)
+  - Homebrew tap (`brew tap neul-labs/tap && brew install rpytest`)
+  - PyPI package with bundled platform binaries
+
+### Fixed
+
+- CI workflow paths (`daemon/` → `pip-package/`)
+- Version alignment across Cargo, Python, and documentation
+- All placeholder URLs updated to `github.com/neul-labs/rpytest`
+- License changed to MIT-only throughout
+
 ## [0.1.0] - 2024-01-15
 
 ### Added
@@ -78,7 +101,7 @@ All notable changes to rpytest are documented here.
 
 ## Versioning
 
-rpytest follows [Semantic Versioning](https://semver.org/):
+rpytest follows [Semantic Versioning](https://semver.org):
 
 - **MAJOR**: Breaking changes to CLI or behavior
 - **MINOR**: New features, backwards compatible
@@ -92,7 +115,7 @@ rpytest follows [Semantic Versioning](https://semver.org/):
 
 ## Upgrading
 
-### From 0.0.x to 0.1.x
+### From 0.1.x to 0.1.2
 
 No breaking changes. Direct upgrade supported.
 
@@ -112,7 +135,7 @@ parallel = 4
 
 ## Contributing
 
-See [CONTRIBUTING.md](https://github.com/anthropics/rpytest/blob/main/CONTRIBUTING.md) for:
+Contributions are welcome on [GitHub](https://github.com/neul-labs/rpytest):
 
 - Development setup
 - Code style guidelines

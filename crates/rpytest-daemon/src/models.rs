@@ -43,6 +43,45 @@ impl From<TestOutcome> for String {
     }
 }
 
+/// Stability states for a test based on its recent outcome history.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum StabilityState {
+    /// Not enough data to determine stability.
+    #[default]
+    Unknown,
+    /// Consistently passing.
+    Stable { consecutive_passes: u32 },
+    /// Consistently failing.
+    Unstable { consecutive_failures: u32 },
+    /// Outcomes are alternating (at least one flip detected).
+    Flaky { streak_count: u32 },
+    /// Confirmed flaky after repeated alternations.
+    ConfirmedFlaky,
+}
+
+impl StabilityState {
+    /// Returns true if the test is considered flaky.
+    ///
+    /// Requires at least 2 flips (streak_count >= 2) in the Flaky state,
+    /// or being in ConfirmedFlaky state.
+    pub fn is_flaky(&self) -> bool {
+        matches!(
+            self,
+            StabilityState::Flaky { streak_count: 2.. } | StabilityState::ConfirmedFlaky
+        )
+    }
+
+    /// Returns true if the test is confirmed flaky.
+    pub fn is_confirmed_flaky(&self) -> bool {
+        matches!(self, StabilityState::ConfirmedFlaky)
+    }
+
+    /// Returns true if the test is stable (consistently passing).
+    pub fn is_stable(&self) -> bool {
+        matches!(self, StabilityState::Stable { .. })
+    }
+}
+
 /// Represents a single test node.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TestNode {
@@ -182,6 +221,8 @@ pub struct FlakinessRecord {
     pub flaky_streak: u32,
     pub total_runs: u32,
     pub last_failure_message: Option<String>,
+    #[serde(default)]
+    pub stability: StabilityState,
 }
 
 /// Fixture scope levels.

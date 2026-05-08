@@ -62,13 +62,17 @@ jobs:
           fi
           cargo build --release --target ${{ matrix.target }} --package rpytest
 
+      - name: Test artifact
+        run: |
+          target/${{ matrix.target }}/release/rpytest --version
+
       - name: Package binary
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
           ARCHIVE_NAME="rpytest-${VERSION}-${{ matrix.target }}"
           mkdir -p dist/${ARCHIVE_NAME}
           cp target/${{ matrix.target }}/release/rpytest dist/${ARCHIVE_NAME}/
-          cp README.md LICENSE-MIT LICENSE-APACHE dist/${ARCHIVE_NAME}/ 2>/dev/null || true
+          cp README.md LICENSE dist/${ARCHIVE_NAME}/
           cd dist
           tar czvf ${ARCHIVE_NAME}.tar.gz ${ARCHIVE_NAME}
           sha256sum ${ARCHIVE_NAME}.tar.gz > ${ARCHIVE_NAME}.tar.gz.sha256
@@ -107,6 +111,8 @@ jobs:
     name: Publish to PyPI
     needs: release
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Required for trusted publishing (OIDC)
 
     steps:
       - uses: actions/checkout@v4
@@ -140,13 +146,14 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: pip-package/dist/
-          password: ${{ secrets.PYPI_API_TOKEN }}
           skip-existing: true
 
   publish-crates:
     name: Publish to crates.io
     needs: release
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Required for crates.io trusted publishing (OIDC)
 
     steps:
       - uses: actions/checkout@v4
@@ -154,12 +161,144 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-action@stable
 
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Authenticate with crates.io via OIDC
+        run: |
+          # 1. Obtain GitHub Actions OIDC token for crates.io
+          OIDC_TOKEN=$(curl -s -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=crates-io" | jq -r '.value')
+
+          # 2. Exchange OIDC token for a short-lived crates.io API token
+          CARGO_TOKEN=$(curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"token\":\"$OIDC_TOKEN\"}" \
+            https://crates.io/api/v1/me/tokens | jq -r '.token')
+
+          # 3. Log in to crates.io
+          cargo login "$CARGO_TOKEN"
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
+          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+
       - name: Publish crates
         run: |
-          cargo publish --package rpytest-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          cargo publish --package rpytest-core
           sleep 30  # Wait for crates.io to index
-          cargo publish --package rpytest-ipc --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          cargo publish --package rpytest-ipc
           sleep 30
-          cargo publish --package rpytest --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          cargo publish --package rpytest-daemon
+          sleep 30
+          cargo publish --package rpytest
+
+  publish-npm:
+    name: Publish to npm
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Required for npm trusted publishing (OIDC)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Prepare npm package
+        run: |
+          mkdir -p npm-package/bin
+          for archive in artifacts/*.tar.gz; do
+            tar xzf "$archive" -C npm-package/bin --strip-components=1
+          done
+          # Remove target suffixes from binary names for npm wrapper
+          for f in npm-package/bin/rpytest-*; do
+            if [ -f "$f" ]; then
+              target=$(basename "$f" | sed 's/rpytest-//')
+              mv "$f" "npm-package/bin/rpytest-${target}"
+            fi
+          done
+
+      - name: Publish to npm with provenance
+        run: |
+          cd npm-package
+          npm publish --access public --provenance
+
+  publish-brew:
+    name: Update Homebrew Tap
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate Homebrew formula
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          MAC_INTEL_SHA=$(cat artifacts/rpytest-${VERSION}-x86_64-apple-darwin.tar.gz.sha256 | awk '{print $1}')
+          MAC_ARM_SHA=$(cat artifacts/rpytest-${VERSION}-aarch64-apple-darwin.tar.gz.sha256 | awk '{print $1}')
+          LINUX_INTEL_SHA=$(cat artifacts/rpytest-${VERSION}-x86_64-unknown-linux-gnu.tar.gz.sha256 | awk '{print $1}')
+          LINUX_ARM_SHA=$(cat artifacts/rpytest-${VERSION}-aarch64-unknown-linux-gnu.tar.gz.sha256 | awk '{print $1}')
+
+          cat > rpytest.rb <<EOF
+          class Rpytest < Formula
+            desc "Rust-powered, drop-in replacement for pytest"
+            homepage "https://github.com/neul-labs/rpytest"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.intel?
+                url "https://github.com/neul-labs/rpytest/releases/download/v${VERSION}/rpytest-${VERSION}-x86_64-apple-darwin.tar.gz"
+                sha256 "${MAC_INTEL_SHA}"
+              else
+                url "https://github.com/neul-labs/rpytest/releases/download/v${VERSION}/rpytest-${VERSION}-aarch64-apple-darwin.tar.gz"
+                sha256 "${MAC_ARM_SHA}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.intel?
+                url "https://github.com/neul-labs/rpytest/releases/download/v${VERSION}/rpytest-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${LINUX_INTEL_SHA}"
+              else
+                url "https://github.com/neul-labs/rpytest/releases/download/v${VERSION}/rpytest-${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${LINUX_ARM_SHA}"
+              end
+            end
+
+            def install
+              bin.install "rpytest"
+            end
+
+            test do
+              system "#{bin}/rpytest", "--version"
+            end
+          end
+          EOF
+
+      - name: Push to homebrew tap
+        run: |
+          git clone https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/neul-labs/homebrew-tap.git tap
+          cp rpytest.rb tap/Formula/rpytest.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/rpytest.rb
+          git commit -m "Update rpytest to ${GITHUB_REF#refs/tags/v}" || true
+          git push

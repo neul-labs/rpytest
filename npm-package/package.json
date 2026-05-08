@@ -1,0 +1,41 @@
+{
+  "name": "rpytest",
+  "version": "0.1.2",
+  "description": "Rust-powered, drop-in replacement for pytest",
+  "main": "bin/rpytest",
+  "bin": {
+    "rpytest": "bin/rpytest"
+  },
+  "scripts": {
+    "postinstall": "node install.js",
+    "prepublishOnly": "echo 'Run release workflow to publish binaries first' && exit 1"
+  },
+  "files": [
+    "bin/",
+    "install.js",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/neul-labs/rpytest.git"
+  },
+  "keywords": [
+    "pytest",
+    "testing",
+    "rust",
+    "test-runner",
+    "python"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=14"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
+}

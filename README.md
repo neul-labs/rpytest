@@ -29,6 +29,13 @@ The speed comes from a persistent daemon that keeps Python warm between runs. No
 # Via pip (recommended)
 pip install rpytest
 
+# Via Homebrew (macOS / Linux)
+brew tap neul-labs/tap
+brew install rpytest
+
+# Via npm
+npm install -g rpytest
+
 # Via cargo
 cargo install rpytest
 
@@ -138,7 +145,7 @@ Full documentation at [docs.neullabs.com/rpytest](https://docs.neullabs.com/rpyt
 
 ## Contributing
 
-Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+Contributions welcome!
 
 ```bash
 git clone https://github.com/neul-labs/rpytest.git
@@ -149,4 +156,4 @@ cargo test
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT License](LICENSE-MIT) at your option.
+Licensed under the [MIT License](LICENSE).

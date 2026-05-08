@@ -9,10 +9,11 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Python worker script that runs as a persistent process.
 /// Communicates via JSON over stdin/stdout.
@@ -180,36 +181,146 @@ impl WorkerResult {
     }
 }
 
-/// A persistent Python worker process.
+/// Reason why a worker is being recycled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecycleReason {
+    /// Worker reached maximum run count.
+    MaxRunsReached,
+    /// Worker process is no longer healthy.
+    Unhealthy,
+    /// Worker was explicitly shut down.
+    ExplicitShutdown,
+}
+
+/// Lifecycle states for a worker process.
+///
+/// Transitions:
+/// - Spawning -> Ready (successful startup handshake)
+/// - Ready -> Busy (test execution started)
+/// - Busy -> Ready (test execution completed successfully)
+/// - Busy -> Recycling (max runs reached or error)
+/// - Ready -> Recycling (explicit shutdown or max runs)
+/// - Recycling -> Dead (process exited)
+/// - Spawning -> Dead (startup failed)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerState {
+    /// Worker process is starting up.
+    Spawning,
+    /// Worker is idle and ready to accept work.
+    Ready,
+    /// Worker is currently executing tests.
+    Busy { started_at: Instant },
+    /// Worker is being recycled and should not accept new work.
+    Recycling { reason: RecycleReason },
+    /// Worker process has exited.
+    Dead { exit_code: Option<i32> },
+}
+
+impl WorkerState {
+    /// Returns true if the worker can accept test execution.
+    pub fn is_ready(&self) -> bool {
+        matches!(self, WorkerState::Ready)
+    }
+
+    /// Returns true if the worker is actively running tests.
+    pub fn is_busy(&self) -> bool {
+        matches!(self, WorkerState::Busy { .. })
+    }
+
+    /// Returns true if the worker process is still alive (Spawning, Ready, or Busy).
+    pub fn is_alive(&self) -> bool {
+        matches!(
+            self,
+            WorkerState::Spawning | WorkerState::Ready | WorkerState::Busy { .. }
+        )
+    }
+
+    /// Returns true if the worker has been recycled or is dead.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            WorkerState::Recycling { .. } | WorkerState::Dead { .. }
+        )
+    }
+
+    /// Attempt to transition to a new state.
+    /// Returns the new state on success, or an error if the transition is invalid.
+    pub fn transition_to(self, next: WorkerState) -> Result<WorkerState> {
+        let valid = match (&self, &next) {
+            // Spawning can become Ready or Dead
+            (WorkerState::Spawning, WorkerState::Ready) => true,
+            (WorkerState::Spawning, WorkerState::Dead { .. }) => true,
+            // Ready can become Busy, Recycling, or Dead
+            (WorkerState::Ready, WorkerState::Busy { .. }) => true,
+            (WorkerState::Ready, WorkerState::Recycling { .. }) => true,
+            (WorkerState::Ready, WorkerState::Dead { .. }) => true,
+            // Busy can become Ready, Recycling, or Dead
+            (WorkerState::Busy { .. }, WorkerState::Ready) => true,
+            (WorkerState::Busy { .. }, WorkerState::Recycling { .. }) => true,
+            (WorkerState::Busy { .. }, WorkerState::Dead { .. }) => true,
+            // Recycling can only become Dead
+            (WorkerState::Recycling { .. }, WorkerState::Dead { .. }) => true,
+            // Dead is terminal - no further transitions
+            (WorkerState::Dead { .. }, _) => false,
+            // Any other transition is invalid
+            _ => false,
+        };
+
+        if valid {
+            Ok(next)
+        } else {
+            Err(DaemonError::Other(format!(
+                "Invalid worker state transition: {:?} -> {:?}",
+                self, next
+            )))
+        }
+    }
+}
+
+/// A persistent Python worker process with explicit state machine lifecycle.
 pub struct Worker {
     child: Child,
     stdin: tokio::process::ChildStdin,
     stdout: BufReader<tokio::process::ChildStdout>,
     id: usize,
+    state: WorkerState,
     run_count: usize,
+    max_runs: usize,
 }
 
 impl std::fmt::Debug for Worker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Worker")
             .field("id", &self.id)
+            .field("state", &self.state)
             .field("run_count", &self.run_count)
             .finish_non_exhaustive()
     }
 }
 
 impl Worker {
+    /// Maximum number of test runs before a worker is recycled.
+    const DEFAULT_MAX_RUNS: usize = 100;
+
     /// Spawn a new worker process.
+    ///
+    /// The worker is created in `Spawning` state and transitions to `Ready`
+    /// after successfully receiving the ready signal from the worker script.
     pub async fn spawn(python_path: &PathBuf, id: usize, working_dir: &PathBuf) -> Result<Self> {
-        debug!("Spawning worker {} with python: {} in dir: {}", id, python_path.display(), working_dir.display());
+        debug!(
+            "Spawning worker {} with python: {} in dir: {}",
+            id,
+            python_path.display(),
+            working_dir.display()
+        );
 
         let mut child = Command::new(python_path)
             .arg("-c")
             .arg(WORKER_SCRIPT)
-            .current_dir(working_dir) // Run from repo root so test paths resolve correctly
+            .current_dir(working_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null()) // Ignore stderr to avoid blocking
+            .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| DaemonError::Other(format!("Failed to spawn worker {}: {}", id, e)))?;
@@ -227,11 +338,14 @@ impl Worker {
             stdin,
             stdout: BufReader::new(stdout),
             id,
+            state: WorkerState::Spawning,
             run_count: 0,
+            max_runs: Self::DEFAULT_MAX_RUNS,
         };
 
-        // Wait for ready signal
+        // Wait for ready signal - transitions Spawning -> Ready
         worker.wait_ready().await?;
+        worker.state = WorkerState::Ready;
         info!("Worker {} ready", id);
 
         Ok(worker)
@@ -262,7 +376,56 @@ impl Worker {
     }
 
     /// Run tests and return results.
+    ///
+    /// Requires the worker to be in `Ready` state. Transitions to `Busy` during
+    /// execution, then back to `Ready` on success or `Recycling` on error.
     pub async fn run_tests(&mut self, tests: Vec<String>) -> Result<Vec<TestResult>> {
+        // Validate state transition: Ready -> Busy
+        if !self.state.is_ready() {
+            return Err(DaemonError::Other(format!(
+                "Worker {} cannot run tests in state {:?}",
+                self.id, self.state
+            )));
+        }
+
+        self.state = WorkerState::Busy {
+            started_at: Instant::now(),
+        };
+
+        let result = self.execute_tests(tests).await;
+
+        // Transition back based on result and run count
+        match result {
+            Ok(ref results) => {
+                self.run_count += 1;
+                debug!(
+                    "Worker {} completed run {} with {} results",
+                    self.id,
+                    self.run_count,
+                    results.len()
+                );
+
+                if self.needs_recycle() {
+                    self.state = WorkerState::Recycling {
+                        reason: RecycleReason::MaxRunsReached,
+                    };
+                } else {
+                    self.state = WorkerState::Ready;
+                }
+            }
+            Err(ref e) => {
+                warn!("Worker {} error during test execution: {}", self.id, e);
+                self.state = WorkerState::Recycling {
+                    reason: RecycleReason::Unhealthy,
+                };
+            }
+        }
+
+        result
+    }
+
+    /// Internal test execution without state management.
+    async fn execute_tests(&mut self, tests: Vec<String>) -> Result<Vec<TestResult>> {
         let request = WorkerRequest::Run { tests };
         let request_json = serde_json::to_string(&request)
             .map_err(|e| DaemonError::Other(format!("Failed to serialize request: {}", e)))?;
@@ -287,7 +450,10 @@ impl Worker {
         .map_err(|e| DaemonError::Other(format!("Worker {} read error: {}", self.id, e)))?;
 
         let response: WorkerResponse = serde_json::from_str(&line)
-            .map_err(|e| DaemonError::Other(format!("Worker {} invalid response: {} (line: {})", self.id, e, line)))?;
+            .map_err(|e| DaemonError::Other(format!(
+                "Worker {} invalid response: {} (line: {})",
+                self.id, e, line
+            )))?;
 
         if response.status == "error" {
             return Err(DaemonError::Other(format!(
@@ -297,33 +463,57 @@ impl Worker {
             )));
         }
 
-        self.run_count += 1;
-        debug!(
-            "Worker {} completed run {} with {} results",
-            self.id,
-            self.run_count,
-            response.results.len()
-        );
-
         Ok(response.results.into_iter().map(|r| r.into_test_result()).collect())
     }
 
     /// Check if the worker needs recycling (too many runs).
     pub fn needs_recycle(&self) -> bool {
-        self.run_count >= 100
+        self.run_count >= self.max_runs
     }
 
     /// Check if the worker is still alive.
+    ///
+    /// Also updates state to Dead if the process has exited.
     pub fn is_alive(&mut self) -> bool {
+        // If state already indicates dead, skip process check
+        if matches!(self.state, WorkerState::Dead { .. }) {
+            return false;
+        }
+
         match self.child.try_wait() {
             Ok(None) => true,  // Still running
-            Ok(Some(_)) => false,  // Exited
-            Err(_) => false,  // Error checking
+            Ok(Some(status)) => {
+                // Process exited - update state
+                let exit_code = status.code();
+                self.state = WorkerState::Dead { exit_code };
+                false
+            }
+            Err(_) => {
+                // Error checking - assume dead
+                self.state = WorkerState::Dead { exit_code: None };
+                false
+            }
         }
     }
 
+    /// Get the current state of the worker.
+    pub fn state(&self) -> &WorkerState {
+        &self.state
+    }
+
     /// Gracefully shutdown the worker.
+    ///
+    /// Transitions to `Recycling` then `Dead`. Returns an error if the worker
+    /// is already in a terminal state.
     pub async fn shutdown(&mut self) -> Result<()> {
+        if self.state.is_terminal() {
+            return Ok(());
+        }
+
+        self.state = WorkerState::Recycling {
+            reason: RecycleReason::ExplicitShutdown,
+        };
+
         let request = WorkerRequest::Shutdown;
         let request_json = serde_json::to_string(&request).unwrap_or_default();
 
@@ -335,6 +525,8 @@ impl Worker {
 
         // Force kill if still running
         let _ = self.child.kill().await;
+
+        self.state = WorkerState::Dead { exit_code: Some(0) };
 
         Ok(())
     }
@@ -392,28 +584,56 @@ impl WorkerPool {
     }
 
     /// Get an available worker from the pool.
+    ///
+    /// Only returns workers in `Ready` state. Workers that are dead or need
+    /// recycling are dropped.
     async fn acquire(&self) -> Option<Worker> {
         let mut available = self.available.lock().await;
 
-        // Find a healthy worker
+        // Find a healthy worker in Ready state
         while let Some(mut worker) = available.pop() {
-            if worker.is_alive() && !worker.needs_recycle() {
+            if !worker.is_alive() {
+                debug!("Worker {} is dead, dropping", worker.id);
+                continue;
+            }
+            if worker.needs_recycle() {
+                debug!("Worker {} needs recycling", worker.id);
+                // Let it drop (state is already Recycling)
+                continue;
+            }
+            if worker.state().is_ready() {
                 return Some(worker);
             }
-            // Worker is dead or needs recycling, let it drop
-            debug!("Worker {} needs recycling", worker.id);
+            // Worker is in an unexpected state, drop it
+            warn!(
+                "Worker {} in unexpected state {:?}, dropping",
+                worker.id,
+                worker.state()
+            );
         }
 
         None
     }
 
     /// Return a worker to the pool.
+    ///
+    /// Only accepts workers in `Ready` state. Workers in other states are dropped.
     async fn release(&self, worker: Worker) {
+        if !worker.state().is_ready() {
+            debug!(
+                "Not returning worker {} to pool (state: {:?})",
+                worker.id,
+                worker.state()
+            );
+            return;
+        }
+
         let mut available = self.available.lock().await;
         if available.len() < self.size {
             available.push(worker);
+        } else {
+            debug!("Pool is full, dropping worker {}", worker.id);
         }
-        // Otherwise let it drop (pool is full)
     }
 
     /// Execute a batch of tests on an available worker.
@@ -466,7 +686,7 @@ impl WorkerPool {
             }
         };
 
-        // Return worker to pool
+        // Return worker to pool (only if still in Ready state)
         self.release(worker).await;
 
         // Ensure we have workers for next request
@@ -502,11 +722,14 @@ impl WorkerPool {
         all_results
     }
 
-    /// Shutdown all workers in the pool.
+    /// Shutdown all workers in the pool gracefully.
     pub async fn shutdown(&self) {
         let mut available = self.available.lock().await;
-        for mut worker in available.drain(..) {
-            let _ = worker.shutdown().await;
+        for worker in available.drain(..) {
+            let mut worker = worker;
+            if let Err(e) = worker.shutdown().await {
+                warn!("Error shutting down worker {}: {}", worker.id, e);
+            }
         }
     }
 
@@ -545,13 +768,177 @@ mod tests {
 
         let mut worker = worker.unwrap();
         assert!(worker.is_alive());
+        assert!(worker.state().is_ready());
+        assert_eq!(*worker.state(), WorkerState::Ready);
 
         // Cleanup
         let _ = worker.shutdown().await;
+        assert!(worker.state().is_terminal());
     }
 
     #[tokio::test]
-    async fn test_worker_request_serialization() {
+    async fn test_worker_state_transitions() {
+        let python_path = get_python_path();
+        let working_dir = std::env::current_dir().unwrap();
+        let worker = Worker::spawn(&python_path, 0, &working_dir).await;
+
+        if worker.is_err() {
+            eprintln!("Skipping test: {:?}", worker.err());
+            return;
+        }
+
+        let mut worker = worker.unwrap();
+
+        // Initial state after spawn
+        assert_eq!(*worker.state(), WorkerState::Ready);
+
+        // Shutdown should transition to terminal state
+        let _ = worker.shutdown().await;
+        assert!(worker.state().is_terminal());
+        assert!(matches!(*worker.state(), WorkerState::Dead { .. }));
+    }
+
+    #[test]
+    fn test_worker_state_machine_transitions() {
+        // Test valid transitions using fresh values to avoid move issues
+        // Spawning -> Ready (valid)
+        assert!(WorkerState::Spawning
+            .transition_to(WorkerState::Ready)
+            .is_ok());
+        // Spawning -> Dead (valid)
+        assert!(WorkerState::Spawning
+            .transition_to(WorkerState::Dead { exit_code: Some(0) })
+            .is_ok());
+
+        let ready = WorkerState::Ready;
+        // Ready -> Busy (valid)
+        assert!(ready
+            .clone()
+            .transition_to(WorkerState::Busy {
+                started_at: Instant::now(),
+            })
+            .is_ok());
+        // Ready -> Recycling (valid)
+        assert!(ready
+            .clone()
+            .transition_to(WorkerState::Recycling {
+                reason: RecycleReason::MaxRunsReached,
+            })
+            .is_ok());
+        // Ready -> Dead (valid)
+        assert!(ready
+            .clone()
+            .transition_to(WorkerState::Dead { exit_code: Some(0) })
+            .is_ok());
+
+        let busy = WorkerState::Busy {
+            started_at: Instant::now(),
+        };
+        // Busy -> Ready (valid)
+        assert!(busy
+            .clone()
+            .transition_to(WorkerState::Ready)
+            .is_ok());
+        // Busy -> Recycling (valid)
+        assert!(busy
+            .clone()
+            .transition_to(WorkerState::Recycling {
+                reason: RecycleReason::Unhealthy,
+            })
+            .is_ok());
+        // Busy -> Dead (valid)
+        assert!(busy
+            .transition_to(WorkerState::Dead { exit_code: Some(1) })
+            .is_ok());
+
+        let recycling = WorkerState::Recycling {
+            reason: RecycleReason::MaxRunsReached,
+        };
+        // Recycling -> Dead (valid)
+        assert!(recycling
+            .clone()
+            .transition_to(WorkerState::Dead { exit_code: Some(0) })
+            .is_ok());
+
+        // Invalid transitions
+        let dead = WorkerState::Dead { exit_code: Some(0) };
+        // Dead -> anything (invalid)
+        assert!(dead
+            .transition_to(WorkerState::Ready)
+            .is_err());
+
+        let ready2 = WorkerState::Ready;
+        // Ready -> Spawning (invalid)
+        assert!(ready2
+            .clone()
+            .transition_to(WorkerState::Spawning)
+            .is_err());
+
+        let recycling2 = WorkerState::Recycling {
+            reason: RecycleReason::MaxRunsReached,
+        };
+        // Recycling -> Ready (invalid)
+        assert!(recycling2
+            .transition_to(WorkerState::Ready)
+            .is_err());
+    }
+
+    #[test]
+    fn test_worker_state_helpers() {
+        let ready = WorkerState::Ready;
+        let busy = WorkerState::Busy {
+            started_at: Instant::now(),
+        };
+        let recycling = WorkerState::Recycling {
+            reason: RecycleReason::MaxRunsReached,
+        };
+        let dead = WorkerState::Dead { exit_code: Some(0) };
+
+        assert!(ready.is_ready());
+        assert!(!ready.is_busy());
+        assert!(ready.is_alive());
+        assert!(!ready.is_terminal());
+
+        assert!(!busy.is_ready());
+        assert!(busy.is_busy());
+        assert!(busy.is_alive());
+        assert!(!busy.is_terminal());
+
+        assert!(!recycling.is_ready());
+        assert!(!recycling.is_busy());
+        assert!(!recycling.is_alive());
+        assert!(recycling.is_terminal());
+
+        assert!(!dead.is_ready());
+        assert!(!dead.is_busy());
+        assert!(!dead.is_alive());
+        assert!(dead.is_terminal());
+    }
+
+    #[tokio::test]
+    async fn test_worker_run_tests_requires_ready() {
+        let python_path = get_python_path();
+        let working_dir = std::env::current_dir().unwrap();
+        let worker = Worker::spawn(&python_path, 0, &working_dir).await;
+
+        if worker.is_err() {
+            eprintln!("Skipping test: {:?}", worker.err());
+            return;
+        }
+
+        let mut worker = worker.unwrap();
+
+        // Shutdown the worker first
+        let _ = worker.shutdown().await;
+
+        // Attempting to run tests on a dead worker should fail
+        let result = worker.run_tests(vec!["nonexistent::test".to_string()]).await;
+        assert!(result.is_err());
+        assert!(worker.state().is_terminal());
+    }
+
+    #[test]
+    fn test_worker_request_serialization() {
         let request = WorkerRequest::Run {
             tests: vec!["test_a.py::test_1".to_string()],
         };

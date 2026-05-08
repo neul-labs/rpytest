@@ -90,6 +90,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             repo_path: "/path/to/repo".to_string(),
             python_path: Some("/usr/bin/python3".to_string()),
+            execution_mode: None,
         };
 
         let encoded = encode(&request).unwrap();

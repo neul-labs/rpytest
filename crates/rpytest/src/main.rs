@@ -1022,8 +1022,11 @@ async fn handle_cleanup(cli: &Cli, root: &std::path::Path) -> Result<()> {
 }
 
 async fn handle_watch(cli: &Cli, root: &std::path::Path) -> Result<()> {
-    use std::time::Duration;
-    use watch::{filter_test_files, DependencyGraph, FileWatcher, WatchEventKind};
+    use std::time::{Duration, Instant};
+    use watch::{
+        DependencyGraph, FileWatcher, RecollectReason, WatchEvent, WatchEventKind,
+        WatchFileEvent, WatchState, WatcherEventKind,
+    };
 
     let output = Output::new(cli.verbose, cli.quiet);
     output.header(&format!(
@@ -1137,142 +1140,254 @@ async fn handle_watch(cli: &Cli, root: &std::path::Path) -> Result<()> {
         }
     }
 
-    // Main watch loop
+    // Main watch loop with explicit state machine
     output.newline();
     output.info("Waiting for file changes...");
 
+    let mut state = WatchState::Idle;
+
     loop {
-        // Wait for changes with 1 second timeout
-        let events = match watcher.wait_for_changes(Some(Duration::from_secs(1))) {
-            Some(e) if !e.is_empty() => e,
-            _ => continue,
-        };
+        // State machine-driven watch loop
+        match &state {
+            WatchState::Idle => {
+                // Wait for changes with 1 second timeout
+                let events = match watcher.wait_for_changes(Some(Duration::from_secs(1))) {
+                    Some(e) if !e.is_empty() => e,
+                    _ => continue,
+                };
 
-        // Filter to relevant changes
-        let changed_files: Vec<_> = events.iter().map(|e| e.path.clone()).collect();
+                // Map watcher events to state machine events
+                let file_events: Vec<WatchFileEvent> = events
+                    .iter()
+                    .map(|e| WatchFileEvent {
+                        path: e.path.clone(),
+                        kind: match e.kind {
+                            WatcherEventKind::Modified => WatchEventKind::Modified,
+                            WatcherEventKind::Created => WatchEventKind::Created,
+                            WatcherEventKind::Deleted => WatchEventKind::Deleted,
+                            WatcherEventKind::Renamed => WatchEventKind::Renamed,
+                        },
+                    })
+                    .collect();
 
-        output.newline();
-        output.info(&format!("Detected {} file change(s):", changed_files.len()));
-        for path in &changed_files {
-            let kind = events
-                .iter()
-                .find(|e| &e.path == path)
-                .map(|e| match e.kind {
-                    WatchEventKind::Modified => "modified",
-                    WatchEventKind::Created => "created",
-                    WatchEventKind::Deleted => "deleted",
-                    WatchEventKind::Renamed => "renamed",
-                })
-                .unwrap_or("changed");
-            output.info(&format!("  {} ({})", path.display(), kind));
-        }
-
-        // Compute affected tests
-        let affected = dep_graph.compute_affected(&changed_files);
-
-        let tests_to_run = if affected.run_all {
-            // Re-collect and run all tests
-            output.info("Conftest change detected - running all tests");
-
-            // Re-collect
-            let _ = client
-                .send(&Request::Collect {
-                    context_id: context_id.clone(),
-                    force: true,
-                })
-                .await;
-
-            // Get all tests
-            let response = client
-                .send(&Request::List {
-                    context_id: context_id.clone(),
-                    keyword: cli.keyword.clone(),
-                    marker: cli.marker.clone(),
-                })
-                .await?;
-
-            match response {
-                Response::TestList { node_ids } => node_ids,
-                _ => vec![],
+                state = state
+                    .transition(&WatchEvent::FileChanges(file_events))
+                    .unwrap_or_else(|e| {
+                        warn!("Invalid watch state transition: {}", e);
+                        WatchState::Idle
+                    });
             }
-        } else if !affected.node_ids.is_empty() {
-            affected.node_ids
-        } else {
-            // Check if any test files changed
-            let test_file_changes = filter_test_files(events);
-            if !test_file_changes.is_empty() {
-                // Re-collect to pick up new tests
+            WatchState::Debouncing { .. } => {
+                // Simple debounce: sleep for 300ms and then transition
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                state = state.transition(&WatchEvent::Debounced).unwrap_or_else(|e| {
+                    warn!("Invalid watch state transition: {}", e);
+                    WatchState::Idle
+                });
+            }
+            WatchState::ComputingAffected { changed_files } => {
+                output.newline();
+                output.info(&format!("Detected {} file change(s):", changed_files.len()));
+                for path in changed_files {
+                    output.info(&format!("  {}", path.display()));
+                }
+
+                // Compute affected tests
+                let affected = dep_graph.compute_affected(changed_files);
+
+                if affected.run_all {
+                    state = WatchState::Recollecting {
+                        reason: RecollectReason::ConftestChanged,
+                    };
+                } else if !affected.node_ids.is_empty() {
+                    // Run specific affected tests
+                    state = WatchState::Running {
+                        test_count: affected.node_ids.len(),
+                        start_time: Instant::now(),
+                    };
+
+                    output.info(&format!(
+                        "Running {} affected test(s)...",
+                        affected.node_ids.len()
+                    ));
+
+                    let response = client
+                        .send(&Request::Run {
+                            context_id: context_id.clone(),
+                            node_ids: affected.node_ids,
+                            workers: parse_workers(&cli.workers),
+                            maxfail: cli.maxfail,
+                        })
+                        .await;
+
+                    match response {
+                        Ok(Response::RunComplete {
+                            passed,
+                            failed,
+                            skipped,
+                            errors,
+                            duration_ms,
+                            ..
+                        }) => {
+                            output.summary(
+                                passed,
+                                failed,
+                                skipped,
+                                errors,
+                                duration_ms as f64 / 1000.0,
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            output.error(&format!("Run failed: {}", e));
+                        }
+                    }
+
+                    state = state
+                        .transition(&WatchEvent::RunComplete)
+                        .unwrap_or(WatchState::Idle);
+
+                    output.newline();
+                    output.info("Waiting for file changes...");
+                } else {
+                    // Check if test files changed
+                    let test_file_changes: Vec<_> = changed_files
+                        .iter()
+                        .filter(|p| {
+                            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            name.starts_with("test_")
+                                || name.ends_with("_test.py")
+                                || name == "conftest.py"
+                        })
+                        .cloned()
+                        .collect();
+
+                    if !test_file_changes.is_empty() {
+                        let changed_file_names: std::collections::HashSet<_> =
+                            test_file_changes
+                                .iter()
+                                .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+                                .map(|s| s.to_string())
+                                .collect();
+
+                        state = WatchState::Recollecting {
+                            reason: RecollectReason::TestFilesChanged {
+                                file_names: changed_file_names,
+                            },
+                        };
+                    } else {
+                        output.info(
+                            "No known affected tests - consider running full suite with Ctrl+R"
+                        );
+                        state = WatchState::Idle;
+                    }
+                }
+            }
+            WatchState::Recollecting { reason } => {
+                match reason {
+                    RecollectReason::ConftestChanged => {
+                        output.info("Conftest change detected - running all tests");
+                    }
+                    RecollectReason::TestFilesChanged { file_names } => {
+                        output.info(&format!(
+                            "Test file(s) changed: {}",
+                            file_names.iter().cloned().collect::<Vec<_>>().join(", ")
+                        ));
+                    }
+                }
+
+                // Re-collect
                 let _ = client
                     .send(&Request::Collect {
                         context_id: context_id.clone(),
-                        force: false,
+                        force: matches!(reason, RecollectReason::ConftestChanged),
                     })
                     .await;
 
-                // Get tests from changed files
+                // Get tests
                 let response = client
                     .send(&Request::List {
                         context_id: context_id.clone(),
                         keyword: cli.keyword.clone(),
                         marker: cli.marker.clone(),
                     })
-                    .await?;
+                    .await;
 
-                match response {
-                    Response::TestList { node_ids } => {
-                        // Filter to tests in changed files
-                        let changed_file_names: std::collections::HashSet<_> = test_file_changes
-                            .iter()
-                            .filter_map(|e| e.path.file_name().and_then(|n| n.to_str()))
-                            .collect();
-
-                        node_ids
-                            .into_iter()
-                            .filter(|nid| changed_file_names.iter().any(|f| nid.contains(f)))
-                            .collect()
+                let tests_to_run = match response {
+                    Ok(Response::TestList { node_ids }) => {
+                        if let RecollectReason::TestFilesChanged { file_names } = reason {
+                            node_ids
+                                .into_iter()
+                                .filter(|nid| file_names.iter().any(|f| nid.contains(f)))
+                                .collect()
+                        } else {
+                            node_ids
+                        }
                     }
                     _ => vec![],
+                };
+
+                if tests_to_run.is_empty() {
+                    output.info("No tests to run");
+                    state = WatchState::Idle;
+                } else {
+                    state = WatchState::Running {
+                        test_count: tests_to_run.len(),
+                        start_time: Instant::now(),
+                    };
+
+                    output.info(&format!("Running {} test(s)...", tests_to_run.len()));
+
+                    let response = client
+                        .send(&Request::Run {
+                            context_id: context_id.clone(),
+                            node_ids: tests_to_run,
+                            workers: parse_workers(&cli.workers),
+                            maxfail: cli.maxfail,
+                        })
+                        .await;
+
+                    match response {
+                        Ok(Response::RunComplete {
+                            passed,
+                            failed,
+                            skipped,
+                            errors,
+                            duration_ms,
+                            ..
+                        }) => {
+                            output.summary(
+                                passed,
+                                failed,
+                                skipped,
+                                errors,
+                                duration_ms as f64 / 1000.0,
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            output.error(&format!("Run failed: {}", e));
+                        }
+                    }
+
+                    state = state
+                        .transition(&WatchEvent::RunComplete)
+                        .unwrap_or(WatchState::Idle);
+
+                    output.newline();
+                    output.info("Waiting for file changes...");
                 }
-            } else {
-                // Source file changed but no known dependencies
-                output.info("No known affected tests - consider running full suite with Ctrl+R");
-                continue;
             }
-        };
-
-        if tests_to_run.is_empty() {
-            output.info("No tests to run");
-            continue;
+            WatchState::Running { .. } => {
+                // Should not reach here - Running state is handled inline
+                warn!("Unexpected Running state in watch loop");
+                state = WatchState::Idle;
+            }
+            WatchState::WaitingForTrigger => {
+                // Not yet implemented - return to idle
+                state = WatchState::Idle;
+            }
         }
-
-        output.info(&format!(
-            "Running {} affected test(s)...",
-            tests_to_run.len()
-        ));
-
-        let response = client
-            .send(&Request::Run {
-                context_id: context_id.clone(),
-                node_ids: tests_to_run,
-                workers: parse_workers(&cli.workers),
-                maxfail: cli.maxfail,
-            })
-            .await?;
-
-        if let Response::RunComplete {
-            passed,
-            failed,
-            skipped,
-            errors,
-            duration_ms,
-            ..
-        } = response
-        {
-            output.summary(passed, failed, skipped, errors, duration_ms as f64 / 1000.0);
-        }
-
-        output.newline();
-        output.info("Waiting for file changes...");
     }
 }
 

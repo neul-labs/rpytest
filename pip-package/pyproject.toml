@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rpytest"
-version = "0.1.0"
+version = "0.1.2"
 description = "Rust-powered, drop-in replacement for pytest"
 readme = "README.md"
-license = {text = "MIT OR Apache-2.0"}
+license = {text = "MIT"}
 requires-python = ">=3.9"
 authors = [
     {name = "rpytest contributors"}
@@ -19,7 +19,6 @@ classifiers = [
     "Framework :: Pytest",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
@@ -42,9 +41,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/user/rpytest"
-Repository = "https://github.com/user/rpytest"
-Issues = "https://github.com/user/rpytest/issues"
+Homepage = "https://github.com/neul-labs/rpytest"
+Repository = "https://github.com/neul-labs/rpytest"
+Issues = "https://github.com/neul-labs/rpytest/issues"
 
 [project.scripts]
 rpytest = "rpytest_cli:main"
