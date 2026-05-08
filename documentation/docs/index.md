@@ -26,8 +26,8 @@ rpytest is a high-performance test runner that provides full pytest compatibilit
 ## Quick Example
 
 ```bash
-# Install rpytest
-cargo install rpytest
+# Install rpytest (both CLI and daemon are required)
+cargo install rpytest rpytest-daemon
 
 # Run tests (same as pytest!)
 rpytest tests/

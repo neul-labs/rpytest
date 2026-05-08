@@ -90,7 +90,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install -e . rpytest-daemon
+        run: pip install -e . rpytest
 
       - name: Run tests
         run: |
