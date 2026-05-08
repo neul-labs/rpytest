@@ -131,21 +131,21 @@ jobs:
       - name: Prepare pip package
         run: |
           # Copy binaries into pip package
-          mkdir -p pip-package/rpytest_cli/bin
+          mkdir -p packages/pypi/rpytest_cli/bin
           for archive in artifacts/*.tar.gz; do
-            tar xzf "$archive" -C pip-package/rpytest_cli/bin --strip-components=1
+            tar xzf "$archive" -C packages/pypi/rpytest_cli/bin --strip-components=1
           done
 
       - name: Build pip package
         run: |
           pip install build
-          cd pip-package
+          cd packages/pypi
           python -m build
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: pip-package/dist/
+          packages-dir: packages/pypi/dist/
           skip-existing: true
 
   publish-crates:
@@ -216,21 +216,21 @@ jobs:
 
       - name: Prepare npm package
         run: |
-          mkdir -p npm-package/bin
+          mkdir -p packages/npm/bin
           for archive in artifacts/*.tar.gz; do
-            tar xzf "$archive" -C npm-package/bin --strip-components=1
+            tar xzf "$archive" -C packages/npm/bin --strip-components=1
           done
           # Remove target suffixes from binary names for npm wrapper
-          for f in npm-package/bin/rpytest-*; do
+          for f in packages/npm/bin/rpytest-*; do
             if [ -f "$f" ]; then
               target=$(basename "$f" | sed 's/rpytest-//')
-              mv "$f" "npm-package/bin/rpytest-${target}"
+              mv "$f" "packages/npm/bin/rpytest-${target}"
             fi
           done
 
       - name: Publish to npm with provenance
         run: |
-          cd npm-package
+          cd packages/npm
           npm publish --access public --provenance
 
   publish-brew:

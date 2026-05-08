@@ -20,7 +20,7 @@ All notable changes to rpytest are documented here.
 
 ### Fixed
 
-- CI workflow paths (`daemon/` → `pip-package/`)
+- CI workflow paths (`daemon/` → `packages/pypi/`)
 - Version alignment across Cargo, Python, and documentation
 - All placeholder URLs updated to `github.com/neul-labs/rpytest`
 - License changed to MIT-only throughout

@@ -39,7 +39,7 @@ pip install rpytest-daemon
 uv pip install rpytest-daemon
 
 # Or install from source
-cd pip-package/
+cd packages/pypi/
 pip install -e .
 ```
 
