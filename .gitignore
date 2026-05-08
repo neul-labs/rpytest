@@ -31,3 +31,21 @@ ENV/
 *.profraw
 *.profdata
 coverage/
+
+# --- packages/pypi (Python pip package) ---
+packages/pypi/dist/
+packages/pypi/build/
+packages/pypi/*.egg-info/
+packages/pypi/rpytest_cli/bin/
+packages/pypi/.eggs/
+packages/pypi/*.manifest
+packages/pypi/*.spec
+
+# --- packages/npm (Node.js npm package) ---
+packages/npm/node_modules/
+packages/npm/*.tgz
+packages/npm/bin/rpytest-*
+packages/npm/.tmp-extract/
+
+# --- Homebrew tap ---
+homebrew-tap/.brew_home/

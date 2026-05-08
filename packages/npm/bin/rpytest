@@ -1,7 +1,50 @@
 #!/usr/bin/env node
-const { spawn } = require('child_process');
-const path = require('path');
+const { spawn } = require("child_process");
+const path = require("path");
+const fs = require("fs");
 
-const binary = path.join(__dirname, 'rpytest');
-const child = spawn(binary, process.argv.slice(2), { stdio: 'inherit' });
-child.on('exit', (code) => process.exit(code ?? 0));
+function getTarget() {
+  const platform = process.platform;
+  const arch = process.arch;
+
+  let targetArch;
+  if (arch === "x64") {
+    targetArch = "x86_64";
+  } else if (arch === "arm64") {
+    targetArch = "aarch64";
+  } else {
+    console.error(`Unsupported architecture: ${arch}`);
+    process.exit(1);
+  }
+
+  if (platform === "darwin") {
+    return `${targetArch}-apple-darwin`;
+  } else if (platform === "linux") {
+    return `${targetArch}-unknown-linux-gnu`;
+  } else {
+    console.error(`Unsupported platform: ${platform}. rpytest supports macOS and Linux.`);
+    process.exit(1);
+  }
+}
+
+const binDir = __dirname;
+const target = getTarget();
+const platformBinary = path.join(binDir, `rpytest-${target}`);
+const genericBinary = path.join(binDir, "rpytest");
+
+// Prefer platform-specific binary, fall back to generic
+let binary;
+if (fs.existsSync(platformBinary)) {
+  binary = platformBinary;
+} else if (fs.existsSync(genericBinary)) {
+  binary = genericBinary;
+} else {
+  console.error(
+    `rpytest binary not found for ${target}.\n` +
+      "Please run: npm install (to download the binary) or build from source."
+  );
+  process.exit(1);
+}
+
+const child = spawn(binary, process.argv.slice(2), { stdio: "inherit" });
+child.on("exit", (code) => process.exit(code ?? 0));

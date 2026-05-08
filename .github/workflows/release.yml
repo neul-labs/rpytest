@@ -218,14 +218,15 @@ jobs:
         run: |
           mkdir -p packages/npm/bin
           for archive in artifacts/*.tar.gz; do
-            tar xzf "$archive" -C packages/npm/bin --strip-components=1
-          done
-          # Remove target suffixes from binary names for npm wrapper
-          for f in packages/npm/bin/rpytest-*; do
-            if [ -f "$f" ]; then
-              target=$(basename "$f" | sed 's/rpytest-//')
-              mv "$f" "packages/npm/bin/rpytest-${target}"
-            fi
+            # Extract archive name to get target triple
+            # e.g. rpytest-0.1.2-x86_64-apple-darwin.tar.gz → x86_64-apple-darwin
+            basename=$(basename "$archive" .tar.gz)
+            target=$(echo "$basename" | sed 's/rpytest-[0-9]*\.[0-9]*\.[0-9]*-//')
+            # Extract to temp dir, then move binary to platform-specific name
+            tmpdir=$(mktemp -d)
+            tar xzf "$archive" -C "$tmpdir" --strip-components=1
+            mv "$tmpdir/rpytest" "packages/npm/bin/rpytest-${target}"
+            rm -rf "$tmpdir"
           done
 
       - name: Publish to npm with provenance

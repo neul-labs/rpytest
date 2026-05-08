@@ -58,16 +58,17 @@ function downloadFile(url, dest) {
 async function install() {
   const binDir = path.join(__dirname, "bin");
   const target = getTarget();
+  const platformBinary = path.join(binDir, `rpytest-${target}`);
+
+  // Skip if platform binary already exists (bundled in the package)
+  if (fs.existsSync(platformBinary)) {
+    console.log(`rpytest ${VERSION} for ${target} already present.`);
+    return;
+  }
+
   const archiveName = `rpytest-${VERSION}-${target}.tar.gz`;
   const url = `${RELEASE_URL}/v${VERSION}/${archiveName}`;
   const archivePath = path.join(binDir, archiveName);
-  const binaryPath = path.join(binDir, "rpytest");
-
-  // Skip if binary already exists (e.g. bundled in the package)
-  if (fs.existsSync(binaryPath)) {
-    console.log("rpytest binary already present.");
-    return;
-  }
 
   console.log(`Downloading rpytest ${VERSION} for ${target}...`);
   console.log(`URL: ${url}`);
@@ -87,22 +88,34 @@ async function install() {
     throw err;
   }
 
-  // Extract
+  // Extract to temp, then move to platform-specific name
+  const tmpDir = path.join(binDir, ".tmp-extract");
+  fs.mkdirSync(tmpDir, { recursive: true });
+
   console.log("Extracting binary...");
   try {
-    execSync(`tar xzf "${archivePath}" -C "${binDir}" --strip-components=1`, { stdio: "inherit" });
+    execSync(`tar xzf "${archivePath}" -C "${tmpDir}" --strip-components=1`, { stdio: "inherit" });
   } catch (err) {
     console.error("Failed to extract archive:", err.message);
     process.exit(1);
   }
 
-  // Make executable
-  fs.chmodSync(binaryPath, 0o755);
+  // Find the extracted binary and move it to platform-specific name
+  const extractedFiles = fs.readdirSync(tmpDir);
+  const binaryFile = extractedFiles.find((f) => f === "rpytest");
+  if (!binaryFile) {
+    console.error("Binary not found in archive");
+    process.exit(1);
+  }
+
+  fs.renameSync(path.join(tmpDir, binaryFile), platformBinary);
+  fs.chmodSync(platformBinary, 0o755);
 
   // Cleanup
+  fs.rmSync(tmpDir, { recursive: true, force: true });
   fs.unlinkSync(archivePath);
 
-  console.log(`Installed rpytest ${VERSION} at ${binaryPath}`);
+  console.log(`Installed rpytest ${VERSION} at ${platformBinary}`);
 }
 
 install().catch((err) => {

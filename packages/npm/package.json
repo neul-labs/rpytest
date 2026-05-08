@@ -7,8 +7,7 @@
     "rpytest": "bin/rpytest"
   },
   "scripts": {
-    "postinstall": "node install.js",
-    "prepublishOnly": "echo 'Run release workflow to publish binaries first' && exit 1"
+    "postinstall": "node install.js"
   },
   "files": [
     "bin/",
