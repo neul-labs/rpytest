@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Find a Python interpreter that has pytest installed.
 fn find_python_with_pytest(repo_path: &Path) -> PathBuf {
@@ -61,83 +61,27 @@ pub struct TestNodeInternal {
     pub xfail: bool,
 }
 
-/// Execution state machine for the repository context.
+/// Execution state for the repository context.
 ///
-/// Models the lifecycle of test execution within a context:
-/// - `Fixed`: Single executor mode (Embedded, Subprocess, or Pooled)
-/// - `HybridColdStart`: Auto mode - first run with fast cold-start executor
-/// - `HybridWarming`: Auto mode - pooled executor warming in background
-/// - `HybridWarm`: Auto mode - now using pooled executor
-///
-/// State transitions:
-/// - Fixed is terminal (no transitions)
-/// - HybridColdStart -> HybridWarming (after first run starts pooled creation)
-/// - HybridWarming -> HybridWarm (when pooled executor is ready)
-/// - HybridWarming -> HybridColdStart (if pooled creation fails - stays on current executor)
+/// Currently only supports fixed executor modes. Hybrid auto-switching to
+/// pooled mode was removed because it caused test isolation failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionState {
     /// Running with a single fixed executor mode.
     Fixed { mode: ExecutionMode },
-    /// Hybrid auto mode: using fast cold-start executor (embedded or subprocess).
-    /// Pooled workers will be spawned after the first run.
-    HybridColdStart { current_mode: ExecutionMode },
-    /// Hybrid auto mode: pooled executor is warming up in background.
-    /// Still using the cold-start executor for current runs.
-    HybridWarming { current_mode: ExecutionMode },
-    /// Hybrid auto mode: now using pooled executor.
-    HybridWarm,
 }
 
 impl ExecutionState {
-    /// Returns true if the state is in hybrid mode (cold start, warming, or warm).
-    pub fn is_hybrid(&self) -> bool {
-        matches!(
-            self,
-            ExecutionState::HybridColdStart { .. }
-                | ExecutionState::HybridWarming { .. }
-                | ExecutionState::HybridWarm
-        )
-    }
-
     /// Returns true if the state is using the pooled executor.
     pub fn is_pooled(&self) -> bool {
-        matches!(self, ExecutionState::HybridWarm)
-            || matches!(self, ExecutionState::Fixed { mode: ExecutionMode::Pooled })
+        matches!(self, ExecutionState::Fixed { mode: ExecutionMode::Pooled })
     }
 
     /// Returns the current execution mode for display/logging purposes.
     pub fn current_mode(&self) -> ExecutionMode {
         match self {
             ExecutionState::Fixed { mode } => *mode,
-            ExecutionState::HybridColdStart { current_mode } => *current_mode,
-            ExecutionState::HybridWarming { current_mode } => *current_mode,
-            ExecutionState::HybridWarm => ExecutionMode::Pooled,
         }
-    }
-
-    /// Attempt to transition to HybridWarming state.
-    /// Only valid from HybridColdStart.
-    pub fn start_warming(self) -> Option<ExecutionState> {
-        match self {
-            ExecutionState::HybridColdStart { current_mode } => {
-                Some(ExecutionState::HybridWarming { current_mode })
-            }
-            _ => None,
-        }
-    }
-
-    /// Attempt to transition to HybridWarm state.
-    /// Only valid from HybridWarming.
-    pub fn become_warm(self) -> Option<ExecutionState> {
-        match self {
-            ExecutionState::HybridWarming { .. } => Some(ExecutionState::HybridWarm),
-            _ => None,
-        }
-    }
-
-    /// Returns true if pooled workers should be spawned in background.
-    pub fn should_spawn_pooled(&self) -> bool {
-        matches!(self, ExecutionState::HybridColdStart { .. })
     }
 }
 
@@ -182,8 +126,6 @@ pub struct RepoContext {
     pub last_collection_time: f64,
     /// Total runs
     total_runs: u32,
-    /// Pending pooled executor being warmed in background (for hybrid mode)
-    pending_pooled: Arc<tokio::sync::Mutex<Option<Box<dyn TestExecutor>>>>,
 }
 
 impl RepoContext {
@@ -224,19 +166,14 @@ impl RepoContext {
                     (executor, ExecutionState::Fixed { mode: ExecutionMode::Pooled })
                 }
                 ExecutionMode::Auto => {
-                    // Hybrid auto mode: start with fastest available cold-start executor
-                    let (executor, cold_mode) =
-                        create_hybrid_cold_executor(&python_path, repo_path).await?;
+                    // Auto mode: use subprocess for reliable test isolation.
+                    // Pooled mode is available via --execution-mode pooled for projects
+                    // that don't share state between workers.
                     info!(
-                        "Hybrid auto mode: starting with {:?} executor (will switch to pooled after first run)",
-                        cold_mode
+                        "Auto mode: using subprocess executor (use --execution-mode pooled for warm workers)"
                     );
-                    (
-                        executor,
-                        ExecutionState::HybridColdStart {
-                            current_mode: cold_mode,
-                        },
-                    )
+                    let executor = create_executor(ExecutionMode::Subprocess, python_path.clone())?;
+                    (executor, ExecutionState::Fixed { mode: ExecutionMode::Subprocess })
                 }
                 other => {
                     let executor = create_executor(other, python_path.clone())?;
@@ -275,7 +212,6 @@ impl RepoContext {
             use_native: true,
             last_collection_time: 0.0,
             total_runs: 0,
-            pending_pooled: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 
@@ -409,9 +345,6 @@ impl RepoContext {
     ) -> Result<RunSummary> {
         self.total_runs += 1;
 
-        // Handle hybrid mode state transitions
-        self.maybe_transition_hybrid_state().await;
-
         // Configure executor
         let mut config = ExecutorConfig::new();
         config.workers = workers;
@@ -467,11 +400,6 @@ impl RepoContext {
             let executor = executor.lock();
             executor.run_tests(&runnable_node_ids).await
         };
-
-        // After first run in hybrid cold start, spawn pooled workers in background
-        if self.execution_state.should_spawn_pooled() {
-            self.spawn_pooled_workers_background().await;
-        }
 
         // Process results
         let mut passed = 0;
@@ -544,68 +472,6 @@ impl RepoContext {
             errors,
             duration_ms,
         })
-    }
-
-    /// Check if hybrid mode should transition to a new state.
-    ///
-    /// If we're in HybridWarming state and the pooled executor is ready,
-    /// swap to it and transition to HybridWarm.
-    async fn maybe_transition_hybrid_state(&mut self,
-    ) {
-        if !matches!(self.execution_state, ExecutionState::HybridWarming { .. }) {
-            return;
-        }
-
-        let mut pending = self.pending_pooled.lock().await;
-        if let Some(pooled_executor) = pending.take() {
-            info!(
-                "Hybrid auto: switching to pooled executor for faster warm runs (state: {:?} -> HybridWarm)",
-                self.execution_state
-            );
-            let mut executor = self.executor.lock();
-            *executor = pooled_executor;
-            // Update execution state
-            if let Some(new_state) = self.execution_state.clone().become_warm() {
-                self.execution_state = new_state;
-            }
-        }
-    }
-
-    /// Spawn pooled workers in background for hybrid mode.
-    ///
-    /// Called after the first run in HybridColdStart state. Transitions state
-    /// to HybridWarming.
-    async fn spawn_pooled_workers_background(&mut self) {
-        let worker_count = num_cpus::get();
-        let pending_pooled = self.pending_pooled.clone();
-        let python_path = self.python_path.clone();
-        let repo_path = self.repo_path.clone();
-
-        info!(
-            "Hybrid auto: spawning {} pooled workers in background for next run",
-            worker_count
-        );
-
-        // Transition state to Warming
-        if let Some(new_state) = self.execution_state.clone().start_warming() {
-            self.execution_state = new_state;
-        }
-
-        tokio::spawn(async move {
-            info!("Hybrid auto: background task started, creating pooled executor...");
-            match create_pooled_executor(python_path, Some(worker_count), repo_path).await {
-                Ok(executor) => {
-                    info!("Hybrid auto: pooled executor created, storing...");
-                    let mut pending = pending_pooled.lock().await;
-                    *pending = Some(executor);
-                    info!("Hybrid auto: pooled executor ready");
-                }
-                Err(e) => {
-                    warn!("Hybrid auto: failed to create pooled executor: {}", e);
-                    // Note: state remains HybridWarming; next run will check again
-                }
-            }
-        });
     }
 
     /// Save context state to storage.
@@ -690,31 +556,3 @@ impl RepoContext {
     }
 }
 
-/// Create the best available cold-start executor for hybrid auto mode.
-async fn create_hybrid_cold_executor(
-    python_path: &PathBuf,
-    _repo_path: &Path,
-) -> Result<(Box<dyn TestExecutor>, ExecutionMode)> {
-    #[cfg(feature = "embedded-python")]
-    {
-        if crate::embedded::EmbeddedExecutor::is_available() {
-            match crate::embedded::EmbeddedExecutor::new(Some(python_path.clone())) {
-                Ok(executor) => {
-                    return Ok((Box::new(executor) as Box<dyn TestExecutor>, ExecutionMode::Embedded));
-                }
-                Err(e) => {
-                    info!("Embedded unavailable ({}), using subprocess for hybrid cold start", e);
-                }
-            }
-        } else {
-            info!("Embedded Python not available, using subprocess for hybrid cold start");
-        }
-    }
-    #[cfg(not(feature = "embedded-python"))]
-    {
-        info!("Embedded Python feature not enabled, using subprocess for hybrid cold start");
-    }
-
-    let executor = create_executor(ExecutionMode::Subprocess, python_path.clone())?;
-    Ok((executor, ExecutionMode::Subprocess))
-}
