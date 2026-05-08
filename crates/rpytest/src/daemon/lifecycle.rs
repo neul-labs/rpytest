@@ -218,9 +218,7 @@ impl LifecycleManager {
     ///
     /// Validates the tracked PID against reality.
     pub fn is_running(&self) -> bool {
-        self.tracked_pid
-            .map(is_process_alive)
-            .unwrap_or(false)
+        self.tracked_pid.map(is_process_alive).unwrap_or(false)
     }
 
     /// Get daemon info.
@@ -280,9 +278,7 @@ impl LifecycleManager {
             (DaemonState::Running, LifecycleEvent::HealthCheckFailed { .. }) => {
                 DaemonState::Unhealthy
             }
-            (DaemonState::Unhealthy, LifecycleEvent::HealthCheckPassed) => {
-                DaemonState::Running
-            }
+            (DaemonState::Unhealthy, LifecycleEvent::HealthCheckPassed) => DaemonState::Running,
             (DaemonState::Starting, LifecycleEvent::HealthCheckFailed { .. }) => {
                 DaemonState::Unhealthy
             }
@@ -345,17 +341,17 @@ impl LifecycleManager {
         // Check if already running
         if self.current_state.is_alive() {
             if let Some(pid) = self.tracked_pid {
-                info!("Daemon already running with PID {} in {:?} state", pid, self.current_state);
+                info!(
+                    "Daemon already running with PID {} in {:?} state",
+                    pid, self.current_state
+                );
                 return Ok(pid);
             }
         }
 
         // Validate transition
         if !self.current_state.can_start() {
-            anyhow::bail!(
-                "Cannot start daemon from {:?} state",
-                self.current_state
-            );
+            anyhow::bail!("Cannot start daemon from {:?} state", self.current_state);
         }
 
         self.apply_event(LifecycleEvent::StartRequested);
@@ -376,7 +372,10 @@ impl LifecycleManager {
 
         self.apply_event(LifecycleEvent::StartupConfirmed { pid });
 
-        info!("Started daemon with PID {} in {:?} state", pid, self.current_state);
+        info!(
+            "Started daemon with PID {} in {:?} state",
+            pid, self.current_state
+        );
         Ok(pid)
     }
 

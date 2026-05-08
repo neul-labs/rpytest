@@ -269,6 +269,11 @@ mod tests {
         // Batches should be reasonably balanced (within 50% of each other)
         let max_dur = batch1_duration.max(batch2_duration);
         let min_dur = batch1_duration.min(batch2_duration);
-        assert!(max_dur <= min_dur * 2, "Batches not balanced: {} vs {}", batch1_duration, batch2_duration);
+        assert!(
+            max_dur <= min_dur * 2,
+            "Batches not balanced: {} vs {}",
+            batch1_duration,
+            batch2_duration
+        );
     }
 }

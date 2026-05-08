@@ -1,9 +1,7 @@
 //! Storage layer using sled for persistent data.
 
 use crate::error::{DaemonError, Result};
-use crate::models::{
-    FixtureState, FlakinessRecord, NativeTestNode, ScheduledTest, TestNode,
-};
+use crate::models::{FixtureState, FlakinessRecord, NativeTestNode, ScheduledTest, TestNode};
 use rmp_serde::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
 use sled::{Db, Tree};
@@ -54,7 +52,7 @@ impl DaemonStorage {
             .path(storage_path)
             .temporary(false)
             .cache_capacity(256 * 1024 * 1024) // 256MB cache
-            .flush_every_ms(Some(5000))         // Batch flushes every 5s
+            .flush_every_ms(Some(5000)) // Batch flushes every 5s
             .mode(sled::Mode::HighThroughput);
 
         let db = config.open()?;

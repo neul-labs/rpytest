@@ -325,13 +325,15 @@ impl Worker {
             .spawn()
             .map_err(|e| DaemonError::Other(format!("Failed to spawn worker {}: {}", id, e)))?;
 
-        let stdin = child.stdin.take().ok_or_else(|| {
-            DaemonError::Other(format!("Worker {} has no stdin", id))
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| DaemonError::Other(format!("Worker {} has no stdin", id)))?;
 
-        let stdout = child.stdout.take().ok_or_else(|| {
-            DaemonError::Other(format!("Worker {} has no stdout", id))
-        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| DaemonError::Other(format!("Worker {} has no stdout", id)))?;
 
         let mut worker = Self {
             child,
@@ -362,8 +364,9 @@ impl Worker {
         .map_err(|_| DaemonError::Other(format!("Worker {} timed out during startup", self.id)))?
         .map_err(|e| DaemonError::Other(format!("Worker {} read error: {}", self.id, e)))?;
 
-        let response: WorkerResponse = serde_json::from_str(&line)
-            .map_err(|e| DaemonError::Other(format!("Worker {} invalid response: {}", self.id, e)))?;
+        let response: WorkerResponse = serde_json::from_str(&line).map_err(|e| {
+            DaemonError::Other(format!("Worker {} invalid response: {}", self.id, e))
+        })?;
 
         if response.status != "ready" {
             return Err(DaemonError::Other(format!(
@@ -435,9 +438,10 @@ impl Worker {
             .write_all(format!("{}\n", request_json).as_bytes())
             .await
             .map_err(|e| DaemonError::Other(format!("Worker {} write error: {}", self.id, e)))?;
-        self.stdin.flush().await.map_err(|e| {
-            DaemonError::Other(format!("Worker {} flush error: {}", self.id, e))
-        })?;
+        self.stdin
+            .flush()
+            .await
+            .map_err(|e| DaemonError::Other(format!("Worker {} flush error: {}", self.id, e)))?;
 
         // Read response (with timeout)
         let mut line = String::new();
@@ -449,11 +453,12 @@ impl Worker {
         .map_err(|_| DaemonError::Other(format!("Worker {} timed out during test run", self.id)))?
         .map_err(|e| DaemonError::Other(format!("Worker {} read error: {}", self.id, e)))?;
 
-        let response: WorkerResponse = serde_json::from_str(&line)
-            .map_err(|e| DaemonError::Other(format!(
+        let response: WorkerResponse = serde_json::from_str(&line).map_err(|e| {
+            DaemonError::Other(format!(
                 "Worker {} invalid response: {} (line: {})",
                 self.id, e, line
-            )))?;
+            ))
+        })?;
 
         if response.status == "error" {
             return Err(DaemonError::Other(format!(
@@ -463,7 +468,11 @@ impl Worker {
             )));
         }
 
-        Ok(response.results.into_iter().map(|r| r.into_test_result()).collect())
+        Ok(response
+            .results
+            .into_iter()
+            .map(|r| r.into_test_result())
+            .collect())
     }
 
     /// Check if the worker needs recycling (too many runs).
@@ -481,7 +490,7 @@ impl Worker {
         }
 
         match self.child.try_wait() {
-            Ok(None) => true,  // Still running
+            Ok(None) => true, // Still running
             Ok(Some(status)) => {
                 // Process exited - update state
                 let exit_code = status.code();
@@ -517,7 +526,10 @@ impl Worker {
         let request = WorkerRequest::Shutdown;
         let request_json = serde_json::to_string(&request).unwrap_or_default();
 
-        let _ = self.stdin.write_all(format!("{}\n", request_json).as_bytes()).await;
+        let _ = self
+            .stdin
+            .write_all(format!("{}\n", request_json).as_bytes())
+            .await;
         let _ = self.stdin.flush().await;
 
         // Give it a moment to shutdown gracefully
@@ -548,7 +560,11 @@ pub struct WorkerPool {
 impl WorkerPool {
     /// Create a new worker pool with the specified size.
     pub async fn new(size: usize, python_path: PathBuf, working_dir: PathBuf) -> Result<Arc<Self>> {
-        info!("Creating worker pool with {} workers in {}", size, working_dir.display());
+        info!(
+            "Creating worker pool with {} workers in {}",
+            size,
+            working_dir.display()
+        );
 
         let pool = Arc::new(Self {
             available: Mutex::new(Vec::with_capacity(size)),
@@ -835,10 +851,7 @@ mod tests {
             started_at: Instant::now(),
         };
         // Busy -> Ready (valid)
-        assert!(busy
-            .clone()
-            .transition_to(WorkerState::Ready)
-            .is_ok());
+        assert!(busy.clone().transition_to(WorkerState::Ready).is_ok());
         // Busy -> Recycling (valid)
         assert!(busy
             .clone()
@@ -863,24 +876,17 @@ mod tests {
         // Invalid transitions
         let dead = WorkerState::Dead { exit_code: Some(0) };
         // Dead -> anything (invalid)
-        assert!(dead
-            .transition_to(WorkerState::Ready)
-            .is_err());
+        assert!(dead.transition_to(WorkerState::Ready).is_err());
 
         let ready2 = WorkerState::Ready;
         // Ready -> Spawning (invalid)
-        assert!(ready2
-            .clone()
-            .transition_to(WorkerState::Spawning)
-            .is_err());
+        assert!(ready2.clone().transition_to(WorkerState::Spawning).is_err());
 
         let recycling2 = WorkerState::Recycling {
             reason: RecycleReason::MaxRunsReached,
         };
         // Recycling -> Ready (invalid)
-        assert!(recycling2
-            .transition_to(WorkerState::Ready)
-            .is_err());
+        assert!(recycling2.transition_to(WorkerState::Ready).is_err());
     }
 
     #[test]
@@ -932,7 +938,9 @@ mod tests {
         let _ = worker.shutdown().await;
 
         // Attempting to run tests on a dead worker should fail
-        let result = worker.run_tests(vec!["nonexistent::test".to_string()]).await;
+        let result = worker
+            .run_tests(vec!["nonexistent::test".to_string()])
+            .await;
         assert!(result.is_err());
         assert!(worker.state().is_terminal());
     }

@@ -68,13 +68,9 @@ pub enum WatchState {
         deadline: Instant,
     },
     /// Computing which tests are affected by the changed files.
-    ComputingAffected {
-        changed_files: Vec<PathBuf>,
-    },
+    ComputingAffected { changed_files: Vec<PathBuf> },
     /// Re-collecting tests due to conftest or test file changes.
-    Recollecting {
-        reason: RecollectReason,
-    },
+    Recollecting { reason: RecollectReason },
     /// Tests are currently running.
     Running {
         test_count: usize,
@@ -124,9 +120,11 @@ impl WatchState {
                     deadline: *deadline,
                 }
             }
-            (WatchState::Debouncing { events, .. }, WatchEvent::Debounced) => WatchState::ComputingAffected {
-                changed_files: events.iter().map(|e| e.path.clone()).collect(),
-            },
+            (WatchState::Debouncing { events, .. }, WatchEvent::Debounced) => {
+                WatchState::ComputingAffected {
+                    changed_files: events.iter().map(|e| e.path.clone()).collect(),
+                }
+            }
 
             // ComputingAffected: determine next step
             (WatchState::ComputingAffected { changed_files }, WatchEvent::Debounced) => {
@@ -144,16 +142,16 @@ impl WatchState {
             (WatchState::Running { .. }, WatchEvent::RunComplete) => WatchState::Idle,
 
             // WaitingForTrigger: user trigger starts run
-            (WatchState::WaitingForTrigger, WatchEvent::UserTrigger) => {
-                WatchState::Running {
-                    test_count: 0,
-                    start_time: Instant::now(),
+            (WatchState::WaitingForTrigger, WatchEvent::UserTrigger) => WatchState::Running {
+                test_count: 0,
+                start_time: Instant::now(),
+            },
+            (WatchState::WaitingForTrigger, WatchEvent::FileChanges(events)) => {
+                WatchState::Debouncing {
+                    events: events.clone(),
+                    deadline: Instant::now() + Duration::from_millis(300),
                 }
             }
-            (WatchState::WaitingForTrigger, WatchEvent::FileChanges(events)) => WatchState::Debouncing {
-                events: events.clone(),
-                deadline: Instant::now() + Duration::from_millis(300),
-            },
 
             // Shutdown from any state
             (_, WatchEvent::Shutdown) => WatchState::Idle,
@@ -243,17 +241,17 @@ mod tests {
     #[test]
     fn test_watch_state_invalid_transitions() {
         // Cannot transition Idle -> RunComplete
-        assert!(WatchState::Idle.transition(&WatchEvent::RunComplete).is_err());
+        assert!(WatchState::Idle
+            .transition(&WatchEvent::RunComplete)
+            .is_err());
 
         // Cannot transition Running -> Debouncing
-        assert!(
-            WatchState::Running {
-                test_count: 1,
-                start_time: Instant::now(),
-            }
-            .transition(&WatchEvent::FileChanges(vec![]))
-            .is_err()
-        );
+        assert!(WatchState::Running {
+            test_count: 1,
+            start_time: Instant::now(),
+        }
+        .transition(&WatchEvent::FileChanges(vec![]))
+        .is_err());
     }
 
     #[test]

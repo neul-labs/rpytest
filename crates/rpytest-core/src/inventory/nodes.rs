@@ -26,7 +26,6 @@ pub enum TestNodeKind {
     Module,
 }
 
-
 /// A single test node with metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestNode {

@@ -1,6 +1,8 @@
 # rpytest
 
 [![Crates.io](https://img.shields.io/crates/v/rpytest.svg)](https://crates.io/crates/rpytest)
+[![npm](https://img.shields.io/npm/v/rpytest.svg)](https://www.npmjs.com/package/rpytest)
+[![PyPI](https://img.shields.io/pypi/v/rpytest.svg)](https://pypi.org/project/rpytest/)
 [![License](https://img.shields.io/crates/l/rpytest.svg)](https://github.com/neul-labs/rpytest#license)
 [![Documentation](https://img.shields.io/badge/docs-neullabs.com-blue)](https://docs.neullabs.com/rpytest)
 

@@ -11,8 +11,7 @@ impl StabilityState {
     /// Apply an outcome and return the new state.
     ///
     /// The `prev_outcome` is the most recent previous outcome (if any).
-    pub fn transition(
-        self, outcome: &TestOutcome, prev_outcome: Option<&TestOutcome>) -> Self {
+    pub fn transition(self, outcome: &TestOutcome, prev_outcome: Option<&TestOutcome>) -> Self {
         match self {
             StabilityState::Unknown => match outcome {
                 TestOutcome::Passed => StabilityState::Stable {
@@ -34,7 +33,9 @@ impl StabilityState {
                 }
                 _ => StabilityState::Unknown,
             },
-            StabilityState::Unstable { consecutive_failures } => match outcome {
+            StabilityState::Unstable {
+                consecutive_failures,
+            } => match outcome {
                 TestOutcome::Passed => {
                     // First pass after unstable streak: enter flaky
                     StabilityState::Flaky { streak_count: 1 }
@@ -80,9 +81,8 @@ impl StabilityState {
                 match outcome {
                     TestOutcome::Passed => {
                         // Check if previous was also passed (no flip)
-                        let prev_was_pass = prev_outcome.map_or(false, |prev| {
-                            matches!(prev, TestOutcome::Passed)
-                        });
+                        let prev_was_pass =
+                            prev_outcome.map_or(false, |prev| matches!(prev, TestOutcome::Passed));
                         if prev_was_pass {
                             // Start counting stable streak
                             StabilityState::Stable {
@@ -148,12 +148,7 @@ impl FlakinessTracker {
     /// Record a test outcome and update statistics.
     ///
     /// Updates the stability state machine for the test.
-    pub fn record_outcome(
-        &mut self,
-        node_id: &str,
-        outcome: TestOutcome,
-        message: Option<&str>,
-    ) {
+    pub fn record_outcome(&mut self, node_id: &str, outcome: TestOutcome, message: Option<&str>) {
         let record = self
             .records
             .entry(node_id.to_string())
@@ -382,20 +377,34 @@ mod tests {
     fn test_stability_state_transitions() {
         // Unknown -> Stable
         let state = StabilityState::Unknown.transition(&TestOutcome::Passed, None);
-        assert!(matches!(state, StabilityState::Stable { consecutive_passes: 1 }));
+        assert!(matches!(
+            state,
+            StabilityState::Stable {
+                consecutive_passes: 1
+            }
+        ));
 
         // Unknown -> Unstable
         let state = StabilityState::Unknown.transition(&TestOutcome::Failed, None);
-        assert!(matches!(state, StabilityState::Unstable { consecutive_failures: 1 }));
+        assert!(matches!(
+            state,
+            StabilityState::Unstable {
+                consecutive_failures: 1
+            }
+        ));
 
         // Stable -> Flaky (first failure)
-        let state = StabilityState::Stable { consecutive_passes: 3 }
-            .transition(&TestOutcome::Failed, Some(&TestOutcome::Passed));
+        let state = StabilityState::Stable {
+            consecutive_passes: 3,
+        }
+        .transition(&TestOutcome::Failed, Some(&TestOutcome::Passed));
         assert!(matches!(state, StabilityState::Flaky { streak_count: 1 }));
 
         // Unstable -> Flaky (first pass)
-        let state = StabilityState::Unstable { consecutive_failures: 2 }
-            .transition(&TestOutcome::Passed, Some(&TestOutcome::Failed));
+        let state = StabilityState::Unstable {
+            consecutive_failures: 2,
+        }
+        .transition(&TestOutcome::Passed, Some(&TestOutcome::Failed));
         assert!(matches!(state, StabilityState::Flaky { streak_count: 1 }));
 
         // Flaky with flip -> Flaky (streak increases)
@@ -411,16 +420,28 @@ mod tests {
         // Flaky without flip -> Stable
         let state = StabilityState::Flaky { streak_count: 1 }
             .transition(&TestOutcome::Passed, Some(&TestOutcome::Passed));
-        assert!(matches!(state, StabilityState::Stable { consecutive_passes: 1 }));
+        assert!(matches!(
+            state,
+            StabilityState::Stable {
+                consecutive_passes: 1
+            }
+        ));
 
         // Flaky without flip -> Unstable
         let state = StabilityState::Flaky { streak_count: 1 }
             .transition(&TestOutcome::Failed, Some(&TestOutcome::Failed));
-        assert!(matches!(state, StabilityState::Unstable { consecutive_failures: 1 }));
+        assert!(matches!(
+            state,
+            StabilityState::Unstable {
+                consecutive_failures: 1
+            }
+        ));
 
         // Skipped resets to Unknown
-        let state = StabilityState::Stable { consecutive_passes: 5 }
-            .transition(&TestOutcome::Skipped, Some(&TestOutcome::Passed));
+        let state = StabilityState::Stable {
+            consecutive_passes: 5,
+        }
+        .transition(&TestOutcome::Skipped, Some(&TestOutcome::Passed));
         assert!(matches!(state, StabilityState::Unknown));
     }
 
@@ -502,7 +523,12 @@ mod tests {
         tracker.record_outcome("test_recover", TestOutcome::Passed, None);
 
         let state = tracker.stability_state("test_recover");
-        assert!(matches!(state, StabilityState::Stable { consecutive_passes: 4 }));
+        assert!(matches!(
+            state,
+            StabilityState::Stable {
+                consecutive_passes: 4
+            }
+        ));
         assert!(!tracker.is_flaky("test_recover"));
     }
 

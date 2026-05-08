@@ -6,12 +6,12 @@ use crate::models::{DaemonConfig, ExecutionMode, TestNode};
 use crate::storage::DaemonStorage;
 use nng::options::{Options, RecvTimeout};
 use nng::{Message, Protocol, Socket};
+use parking_lot::Mutex;
 use rmp_serde::Deserializer;
 use rpytest_core::protocol::{ErrorCode, Request, Response, PROTOCOL_VERSION};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use parking_lot::Mutex;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -260,7 +260,7 @@ impl DaemonServer {
                     python_path.as_deref().unwrap_or("auto"),
                     mode
                 );
-                use sha2::{Sha256, Digest};
+                use sha2::{Digest, Sha256};
                 let mut hasher = Sha256::new();
                 hasher.update(context_key.as_bytes());
                 let context_id = format!("ctx-{}", hex::encode(&hasher.finalize()[..8]));
@@ -274,8 +274,7 @@ impl DaemonServer {
                         let execution_mode = context.execution_mode();
                         info!(
                             "Reusing existing context {} with {} execution mode",
-                            context_id,
-                            execution_mode
+                            context_id, execution_mode
                         );
                         return Response::ContextReady {
                             protocol_version: PROTOCOL_VERSION,
@@ -292,7 +291,9 @@ impl DaemonServer {
                     python_path.map(std::path::PathBuf::from),
                     Some(storage.clone()),
                     mode,
-                ).await {
+                )
+                .await
+                {
                     Ok(ctx) => ctx,
                     Err(e) => {
                         return Response::Error {
@@ -306,12 +307,14 @@ impl DaemonServer {
 
                 // Store context wrapped in Arc<tokio::sync::Mutex> for concurrent access
                 let mut contexts = contexts.lock();
-                contexts.insert(context_id.clone(), Arc::new(tokio::sync::Mutex::new(context)));
+                contexts.insert(
+                    context_id.clone(),
+                    Arc::new(tokio::sync::Mutex::new(context)),
+                );
 
                 info!(
                     "Created new context {} with {} execution mode",
-                    context_id,
-                    execution_mode
+                    context_id, execution_mode
                 );
 
                 Response::ContextReady {

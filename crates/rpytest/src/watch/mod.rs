@@ -6,6 +6,8 @@ mod watcher;
 
 #[allow(unused_imports)]
 pub use dependency::{AffectedTests, DependencyGraph};
-pub use state::{RecollectReason, WatchEvent, WatchFileEvent, WatchEventKind, WatchState};
+pub use state::{RecollectReason, WatchEvent, WatchEventKind, WatchFileEvent, WatchState};
 #[allow(unused_imports)]
-pub use watcher::{filter_test_files, FileWatcher, WatchEvent as WatcherEvent, WatchEventKind as WatcherEventKind};
+pub use watcher::{
+    filter_test_files, FileWatcher, WatchEvent as WatcherEvent, WatchEventKind as WatcherEventKind,
+};

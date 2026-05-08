@@ -480,7 +480,8 @@ fn filter_by_paths(node_ids: &[String], paths: &[String]) -> Vec<String> {
                     // Check if the path is a directory (with or without trailing slash)
                     if path.ends_with('/') || path.ends_with("/.") {
                         let dir_path = path.trim_end_matches('/').trim_end_matches("/.");
-                        if file_part == dir_path || file_part.starts_with(&format!("{}/", dir_path)) {
+                        if file_part == dir_path || file_part.starts_with(&format!("{}/", dir_path))
+                        {
                             return true;
                         }
                     }
@@ -1003,14 +1004,13 @@ async fn handle_cleanup(cli: &Cli, root: &std::path::Path) -> Result<()> {
 
     // Also clean up runtime files if requested
     let config = LifecycleConfig::default();
-    if config.socket_path.exists()
-        && !daemon::LifecycleManager::new(config.clone()).is_running() {
-            std::fs::remove_file(&config.socket_path).ok();
-            output.info(&format!(
-                "Removed stale socket: {}",
-                config.socket_path.display()
-            ));
-        }
+    if config.socket_path.exists() && !daemon::LifecycleManager::new(config.clone()).is_running() {
+        std::fs::remove_file(&config.socket_path).ok();
+        output.info(&format!(
+            "Removed stale socket: {}",
+            config.socket_path.display()
+        ));
+    }
 
     if result.removed > 0 {
         output.info(&format!("Cleaned up {} stale context(s)", result.removed));
@@ -1024,8 +1024,8 @@ async fn handle_cleanup(cli: &Cli, root: &std::path::Path) -> Result<()> {
 async fn handle_watch(cli: &Cli, root: &std::path::Path) -> Result<()> {
     use std::time::{Duration, Instant};
     use watch::{
-        DependencyGraph, FileWatcher, RecollectReason, WatchEvent, WatchEventKind,
-        WatchFileEvent, WatchState, WatcherEventKind,
+        DependencyGraph, FileWatcher, RecollectReason, WatchEvent, WatchEventKind, WatchFileEvent,
+        WatchState, WatcherEventKind,
     };
 
     let output = Output::new(cli.verbose, cli.quiet);
@@ -1180,10 +1180,12 @@ async fn handle_watch(cli: &Cli, root: &std::path::Path) -> Result<()> {
             WatchState::Debouncing { .. } => {
                 // Simple debounce: sleep for 300ms and then transition
                 tokio::time::sleep(Duration::from_millis(300)).await;
-                state = state.transition(&WatchEvent::Debounced).unwrap_or_else(|e| {
-                    warn!("Invalid watch state transition: {}", e);
-                    WatchState::Idle
-                });
+                state = state
+                    .transition(&WatchEvent::Debounced)
+                    .unwrap_or_else(|e| {
+                        warn!("Invalid watch state transition: {}", e);
+                        WatchState::Idle
+                    });
             }
             WatchState::ComputingAffected { changed_files } => {
                 output.newline();
@@ -1263,12 +1265,11 @@ async fn handle_watch(cli: &Cli, root: &std::path::Path) -> Result<()> {
                         .collect();
 
                     if !test_file_changes.is_empty() {
-                        let changed_file_names: std::collections::HashSet<_> =
-                            test_file_changes
-                                .iter()
-                                .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
-                                .map(|s| s.to_string())
-                                .collect();
+                        let changed_file_names: std::collections::HashSet<_> = test_file_changes
+                            .iter()
+                            .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+                            .map(|s| s.to_string())
+                            .collect();
 
                         state = WatchState::Recollecting {
                             reason: RecollectReason::TestFilesChanged {
@@ -1277,7 +1278,7 @@ async fn handle_watch(cli: &Cli, root: &std::path::Path) -> Result<()> {
                         };
                     } else {
                         output.info(
-                            "No known affected tests - consider running full suite with Ctrl+R"
+                            "No known affected tests - consider running full suite with Ctrl+R",
                         );
                         state = WatchState::Idle;
                     }
@@ -1506,7 +1507,10 @@ mod tests {
         ];
 
         // Filter by multiple paths
-        let result = filter_by_paths(&node_ids, &["test_a.py".to_string(), "test_c.py".to_string()]);
+        let result = filter_by_paths(
+            &node_ids,
+            &["test_a.py".to_string(), "test_c.py".to_string()],
+        );
         assert_eq!(result.len(), 2);
         assert!(result.contains(&"test_a.py::test_one".to_string()));
         assert!(result.contains(&"test_c.py::test_three".to_string()));

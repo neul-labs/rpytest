@@ -42,7 +42,10 @@ fn ensure_pythonhome() {
         let python = std::path::Path::new(&venv).join("bin").join("python3");
         if python.exists() {
             if let Some(base_prefix) = query_python_base_prefix(&python) {
-                info!("Auto-detected PYTHONHOME from VIRTUAL_ENV's base_prefix: {}", base_prefix);
+                info!(
+                    "Auto-detected PYTHONHOME from VIRTUAL_ENV's base_prefix: {}",
+                    base_prefix
+                );
                 std::env::set_var("PYTHONHOME", &base_prefix);
                 return;
             }
@@ -184,13 +187,7 @@ impl RustResultCollector {
 
     /// Called by pytest hook for each test result.
     #[pyo3(signature = (nodeid, outcome, duration, message=None))]
-    fn report(
-        &self,
-        nodeid: String,
-        outcome: String,
-        duration: f64,
-        message: Option<String>,
-    ) {
+    fn report(&self, nodeid: String, outcome: String, duration: f64, message: Option<String>) {
         let test_outcome = match outcome.as_str() {
             "passed" => TestOutcome::Passed,
             "failed" => TestOutcome::Failed,
@@ -358,17 +355,17 @@ impl EmbeddedExecutor {
     ///
     /// Note: Handles version mismatches by scanning for any pythonX.Y directory
     fn setup_python_path(&self, py: Python) -> Result<()> {
-        let sys = py.import_bound("sys").map_err(|e| {
-            DaemonError::Other(format!("Failed to import sys: {}", e))
-        })?;
+        let sys = py
+            .import_bound("sys")
+            .map_err(|e| DaemonError::Other(format!("Failed to import sys: {}", e)))?;
 
-        let path = sys.getattr("path").map_err(|e| {
-            DaemonError::Other(format!("Failed to get sys.path: {}", e))
-        })?;
+        let path = sys
+            .getattr("path")
+            .map_err(|e| DaemonError::Other(format!("Failed to get sys.path: {}", e)))?;
 
-        let path_list: &Bound<PyList> = path.downcast().map_err(|e| {
-            DaemonError::Other(format!("sys.path is not a list: {}", e))
-        })?;
+        let path_list: &Bound<PyList> = path
+            .downcast()
+            .map_err(|e| DaemonError::Other(format!("sys.path is not a list: {}", e)))?;
 
         // Priority 1: Use stored python_path to derive site-packages
         // python_path is like /path/to/.venv/bin/python
@@ -418,7 +415,9 @@ impl EmbeddedExecutor {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                if name_str.starts_with("python") && entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                if name_str.starts_with("python")
+                    && entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                {
                     let site_packages = entry.path().join("site-packages");
                     if site_packages.exists() {
                         debug!("Found site-packages at: {}", site_packages.display());
@@ -443,9 +442,7 @@ impl EmbeddedExecutor {
 
         for test_path in test_paths {
             // Convert file path to module path (e.g., "tests/test_foo.py" -> "tests.test_foo")
-            let module_path = test_path
-                .trim_end_matches(".py")
-                .replace('/', ".");
+            let module_path = test_path.trim_end_matches(".py").replace('/', ".");
 
             // Check if this exact module exists
             if modules.contains(&module_path)? {
@@ -474,7 +471,10 @@ impl EmbeddedExecutor {
         }
 
         if !keys_to_remove.is_empty() {
-            debug!("Cleared {} test modules from sys.modules", keys_to_remove.len());
+            debug!(
+                "Cleared {} test modules from sys.modules",
+                keys_to_remove.len()
+            );
         }
         Ok(())
     }
@@ -484,18 +484,12 @@ impl EmbeddedExecutor {
         let signal = py.import_bound("signal")?;
 
         // Reset SIGALRM (used by pytest-timeout)
-        if let (Ok(sigalrm), Ok(sig_dfl)) = (
-            signal.getattr("SIGALRM"),
-            signal.getattr("SIG_DFL"),
-        ) {
+        if let (Ok(sigalrm), Ok(sig_dfl)) = (signal.getattr("SIGALRM"), signal.getattr("SIG_DFL")) {
             let _ = signal.call_method1("signal", (sigalrm, sig_dfl));
         }
 
         // Reset SIGTERM
-        if let (Ok(sigterm), Ok(sig_dfl)) = (
-            signal.getattr("SIGTERM"),
-            signal.getattr("SIG_DFL"),
-        ) {
+        if let (Ok(sigterm), Ok(sig_dfl)) = (signal.getattr("SIGTERM"), signal.getattr("SIG_DFL")) {
             let _ = signal.call_method1("signal", (sigterm, sig_dfl));
         }
 
@@ -531,9 +525,11 @@ impl EmbeddedExecutor {
             COLLECTOR_PLUGIN,
             "rpytest_collector_plugin.py",
             "rpytest_collector_plugin",
-        ).map_err(|e| DaemonError::Other(format!("Failed to compile plugin module: {}", e)))?;
+        )
+        .map_err(|e| DaemonError::Other(format!("Failed to compile plugin module: {}", e)))?;
 
-        let plugin_class = plugin_module.getattr("RpytestCollectorPlugin")
+        let plugin_class = plugin_module
+            .getattr("RpytestCollectorPlugin")
             .map_err(|e| DaemonError::Other(format!("Failed to get plugin class: {}", e)))?;
 
         let _ = CACHED_PLUGIN_CLASS.set(plugin_class.unbind());
@@ -578,9 +574,11 @@ impl EmbeddedExecutor {
             // OPTIMIZATION: Cache the plugin class to avoid recompiling Python on every run
             let plugin_class = Self::get_or_create_plugin_class(py)?;
 
-            let plugin_instance = plugin_class.call1((collector.clone_ref(py),)).map_err(|e| {
-                DaemonError::Other(format!("Failed to create plugin instance: {}", e))
-            })?;
+            let plugin_instance = plugin_class
+                .call1((collector.clone_ref(py),))
+                .map_err(|e| {
+                    DaemonError::Other(format!("Failed to create plugin instance: {}", e))
+                })?;
 
             // Build pytest arguments
             let mut args: Vec<String> = node_ids.to_vec();
@@ -620,23 +618,21 @@ impl EmbeddedExecutor {
             let plugins = PyList::new_bound(py, [plugin_instance]);
 
             // Import pytest and run
-            let pytest = py.import_bound("pytest").map_err(|e| {
-                DaemonError::Other(format!("Failed to import pytest: {}", e))
-            })?;
+            let pytest = py
+                .import_bound("pytest")
+                .map_err(|e| DaemonError::Other(format!("Failed to import pytest: {}", e)))?;
 
             debug!("Running pytest with {} tests", node_ids.len());
 
             // Call pytest.main(args, plugins=[plugin])
             let kwargs = PyDict::new_bound(py);
-            kwargs.set_item("plugins", plugins).map_err(|e| {
-                DaemonError::Other(format!("Failed to set plugins kwarg: {}", e))
-            })?;
+            kwargs
+                .set_item("plugins", plugins)
+                .map_err(|e| DaemonError::Other(format!("Failed to set plugins kwarg: {}", e)))?;
 
             let exit_code: i32 = pytest
                 .call_method("main", (py_args,), Some(&kwargs))
-                .map_err(|e| {
-                    DaemonError::Other(format!("pytest.main() failed: {}", e))
-                })?
+                .map_err(|e| DaemonError::Other(format!("pytest.main() failed: {}", e)))?
                 .extract()
                 .unwrap_or(-1);
 
@@ -683,9 +679,10 @@ impl EmbeddedExecutor {
     /// Run a single test.
     pub fn run_test(&self, node_id: &str) -> Result<TestResult> {
         let results = self.run_tests(&[node_id.to_string()])?;
-        results.into_iter().next().ok_or_else(|| {
-            DaemonError::Other(format!("No result for test: {}", node_id))
-        })
+        results
+            .into_iter()
+            .next()
+            .ok_or_else(|| DaemonError::Other(format!("No result for test: {}", node_id)))
     }
 
     /// Get Python version info.
@@ -904,7 +901,11 @@ mod tests {
             assert_eq!(results.len(), outcomes.len());
 
             for (i, (_, expected_outcome)) in outcomes.iter().enumerate() {
-                assert_eq!(results[i].outcome, *expected_outcome, "Mismatch at index {}", i);
+                assert_eq!(
+                    results[i].outcome, *expected_outcome,
+                    "Mismatch at index {}",
+                    i
+                );
             }
         });
     }
@@ -987,10 +988,7 @@ mod tests {
         fs::write(&test_file, "def test_passing():\n    assert 1 + 1 == 2\n").unwrap();
 
         let executor = EmbeddedExecutor::new(None).unwrap();
-        let node_id = format!(
-            "{}::test_passing",
-            test_file.to_string_lossy()
-        );
+        let node_id = format!("{}::test_passing", test_file.to_string_lossy());
 
         let result = executor.run_test(&node_id);
         assert!(result.is_ok());
@@ -1013,10 +1011,7 @@ mod tests {
         fs::write(&test_file, "def test_failing():\n    assert 1 == 2\n").unwrap();
 
         let executor = EmbeddedExecutor::new(None).unwrap();
-        let node_id = format!(
-            "{}::test_failing",
-            test_file.to_string_lossy()
-        );
+        let node_id = format!("{}::test_failing", test_file.to_string_lossy());
 
         let result = executor.run_test(&node_id);
         assert!(result.is_ok());
@@ -1090,10 +1085,7 @@ mod tests {
         .unwrap();
 
         let executor = EmbeddedExecutor::new(None).unwrap();
-        let node_id = format!(
-            "{}::test_skipped",
-            test_file.to_string_lossy()
-        );
+        let node_id = format!("{}::test_skipped", test_file.to_string_lossy());
 
         let result = executor.run_test(&node_id);
         assert!(result.is_ok());

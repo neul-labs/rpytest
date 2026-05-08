@@ -46,10 +46,7 @@ pub trait TestExecutor: Send + Sync + std::fmt::Debug {
 /// - `Subprocess`: Always use subprocess execution
 /// - `Pooled`: Use worker pool (requires async - use `create_pooled_executor` instead)
 /// - `Auto`: Try embedded first, fall back to subprocess
-pub fn create_executor(
-    mode: ExecutionMode,
-    python_path: PathBuf,
-) -> Result<Box<dyn TestExecutor>> {
+pub fn create_executor(mode: ExecutionMode, python_path: PathBuf) -> Result<Box<dyn TestExecutor>> {
     match mode {
         ExecutionMode::Embedded => {
             #[cfg(feature = "embedded-python")]
@@ -118,7 +115,11 @@ pub async fn create_pooled_executor(
     working_dir: PathBuf,
 ) -> Result<Box<dyn TestExecutor>> {
     let workers = worker_count.unwrap_or_else(num_cpus::get);
-    info!("Creating pooled executor with {} workers in {}", workers, working_dir.display());
+    info!(
+        "Creating pooled executor with {} workers in {}",
+        workers,
+        working_dir.display()
+    );
 
     let executor = PooledExecutor::new(python_path, workers, working_dir).await?;
     Ok(Box::new(executor))
@@ -603,10 +604,16 @@ pub struct PooledExecutor {
 
 impl PooledExecutor {
     /// Create a new pooled executor.
-    pub async fn new(python_path: PathBuf, worker_count: usize, working_dir: PathBuf) -> Result<Self> {
+    pub async fn new(
+        python_path: PathBuf,
+        worker_count: usize,
+        working_dir: PathBuf,
+    ) -> Result<Self> {
         let pool = WorkerPool::new(worker_count, python_path, working_dir)
             .await
-            .map_err(|e| crate::error::DaemonError::Other(format!("Failed to create worker pool: {}", e)))?;
+            .map_err(|e| {
+                crate::error::DaemonError::Other(format!("Failed to create worker pool: {}", e))
+            })?;
 
         Ok(Self {
             pool,
@@ -663,7 +670,11 @@ impl TestExecutor for PooledExecutor {
             "Running {} tests in {} batches (target batch size: {})",
             node_ids.len(),
             batches.len(),
-            if batches.is_empty() { 0 } else { node_ids.len() / batches.len() }
+            if batches.is_empty() {
+                0
+            } else {
+                node_ids.len() / batches.len()
+            }
         );
 
         // Execute batches in parallel using the worker pool
@@ -720,8 +731,7 @@ mod tests {
         let executor = executor.unwrap();
         // Should be either "embedded" or "subprocess"
         assert!(
-            executor.execution_mode() == "embedded"
-                || executor.execution_mode() == "subprocess"
+            executor.execution_mode() == "embedded" || executor.execution_mode() == "subprocess"
         );
     }
 
@@ -889,10 +899,7 @@ mod tests {
             PythonExecutor::extract_duration("= 1 failed in [1.5s] ="),
             Some(1500)
         );
-        assert_eq!(
-            PythonExecutor::extract_duration("some random text"),
-            None
-        );
+        assert_eq!(PythonExecutor::extract_duration("some random text"), None);
     }
 
     #[test]
@@ -905,10 +912,7 @@ mod tests {
             PythonExecutor::extract_message("Error: something failed"),
             Some("Error: something failed".to_string())
         );
-        assert_eq!(
-            PythonExecutor::extract_message("test passed ok"),
-            None
-        );
+        assert_eq!(PythonExecutor::extract_message("test passed ok"), None);
     }
 
     #[test]

@@ -74,7 +74,12 @@ pub enum ExecutionState {
 impl ExecutionState {
     /// Returns true if the state is using the pooled executor.
     pub fn is_pooled(&self) -> bool {
-        matches!(self, ExecutionState::Fixed { mode: ExecutionMode::Pooled })
+        matches!(
+            self,
+            ExecutionState::Fixed {
+                mode: ExecutionMode::Pooled
+            }
+        )
     }
 
     /// Returns the current execution mode for display/logging purposes.
@@ -160,10 +165,18 @@ impl RepoContext {
                         worker_count,
                         repo_path.display()
                     );
-                    let executor =
-                        create_pooled_executor(python_path.clone(), Some(worker_count), repo_path.to_path_buf())
-                            .await?;
-                    (executor, ExecutionState::Fixed { mode: ExecutionMode::Pooled })
+                    let executor = create_pooled_executor(
+                        python_path.clone(),
+                        Some(worker_count),
+                        repo_path.to_path_buf(),
+                    )
+                    .await?;
+                    (
+                        executor,
+                        ExecutionState::Fixed {
+                            mode: ExecutionMode::Pooled,
+                        },
+                    )
                 }
                 ExecutionMode::Auto => {
                     // Auto mode: use subprocess for reliable test isolation.
@@ -173,7 +186,12 @@ impl RepoContext {
                         "Auto mode: using subprocess executor (use --execution-mode pooled for warm workers)"
                     );
                     let executor = create_executor(ExecutionMode::Subprocess, python_path.clone())?;
-                    (executor, ExecutionState::Fixed { mode: ExecutionMode::Subprocess })
+                    (
+                        executor,
+                        ExecutionState::Fixed {
+                            mode: ExecutionMode::Subprocess,
+                        },
+                    )
                 }
                 other => {
                     let executor = create_executor(other, python_path.clone())?;
@@ -555,4 +573,3 @@ impl RepoContext {
         self.execution_state.current_mode()
     }
 }
-

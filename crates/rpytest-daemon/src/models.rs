@@ -327,7 +327,10 @@ impl std::str::FromStr for ExecutionMode {
             "subprocess" => Ok(ExecutionMode::Subprocess),
             "pooled" => Ok(ExecutionMode::Pooled),
             "auto" => Ok(ExecutionMode::Auto),
-            _ => Err(format!("Invalid execution mode: {}. Use 'embedded', 'subprocess', 'pooled', or 'auto'", s)),
+            _ => Err(format!(
+                "Invalid execution mode: {}. Use 'embedded', 'subprocess', 'pooled', or 'auto'",
+                s
+            )),
         }
     }
 }

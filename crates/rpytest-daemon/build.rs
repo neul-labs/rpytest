@@ -62,9 +62,7 @@ fn fix_macos_libpython_install_name() {
     let dylib_path = format!("{libdir}/{ldlibrary}");
 
     // Check the current install_name of the dylib
-    let otool_output = Command::new("otool")
-        .args(["-D", &dylib_path])
-        .output();
+    let otool_output = Command::new("otool").args(["-D", &dylib_path]).output();
 
     let current_install_name = match otool_output {
         Ok(ref out) if out.status.success() => {

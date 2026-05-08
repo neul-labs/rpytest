@@ -31,7 +31,9 @@ pub mod embedded;
 pub use collector::NativeCollector;
 pub use context::RepoContext;
 pub use error::{DaemonError, Result};
-pub use executor::{create_executor, create_pooled_executor, PooledExecutor, PythonExecutor, TestExecutor};
+pub use executor::{
+    create_executor, create_pooled_executor, PooledExecutor, PythonExecutor, TestExecutor,
+};
 
 #[cfg(feature = "embedded-python")]
 pub use embedded::EmbeddedExecutor;

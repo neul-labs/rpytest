@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
@@ -63,6 +63,7 @@ jobs:
           cargo build --release --target ${{ matrix.target }} --package rpytest
 
       - name: Test artifact
+        if: matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'aarch64-apple-darwin'
         run: |
           target/${{ matrix.target }}/release/rpytest --version
 
@@ -159,38 +160,23 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Install jq
-        run: sudo apt-get install -y jq
-
-      - name: Authenticate with crates.io via OIDC
-        run: |
-          # 1. Obtain GitHub Actions OIDC token for crates.io
-          OIDC_TOKEN=$(curl -s -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=crates-io" | jq -r '.value')
-
-          # 2. Exchange OIDC token for a short-lived crates.io API token
-          CARGO_TOKEN=$(curl -s -X POST \
-            -H "Content-Type: application/json" \
-            -d "{\"token\":\"$OIDC_TOKEN\"}" \
-            https://crates.io/api/v1/me/tokens | jq -r '.token')
-
-          # 3. Log in to crates.io
-          cargo login "$CARGO_TOKEN"
-        env:
-          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
-          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+      - name: Authenticate with crates.io
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
 
       - name: Publish crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
-          cargo publish --package rpytest-core
+          cargo publish --package rpytest-core --token "$CARGO_REGISTRY_TOKEN"
           sleep 30  # Wait for crates.io to index
-          cargo publish --package rpytest-ipc
+          cargo publish --package rpytest-ipc --token "$CARGO_REGISTRY_TOKEN"
           sleep 30
-          cargo publish --package rpytest-daemon
+          cargo publish --package rpytest-daemon --token "$CARGO_REGISTRY_TOKEN"
           sleep 30
-          cargo publish --package rpytest
+          cargo publish --package rpytest --token "$CARGO_REGISTRY_TOKEN"
 
   publish-npm:
     name: Publish to npm
