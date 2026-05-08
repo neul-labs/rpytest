@@ -40,17 +40,28 @@ def get_binary_path() -> Path:
         if binary_path.exists():
             return binary_path
 
-    # Try system PATH
-    try:
-        result = subprocess.run(
-            ["which", "rpytest"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        return Path(result.stdout.strip())
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
+    # Try system PATH, skipping any Python wrapper scripts to avoid
+    # infinite fork loops when the pip package entry point shadows
+    # the Rust binary.
+    this_script = Path(sys.argv[0]).resolve() if sys.argv[0] else None
+    path_dirs = os.get_exec_path()
+    for directory in path_dirs:
+        candidate = Path(directory) / "rpytest"
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            continue
+        resolved = candidate.resolve()
+        # Skip if it resolves to the same file as the current wrapper
+        if this_script and resolved == this_script:
+            continue
+        # Skip Python scripts (they have a #! shebang pointing to python)
+        try:
+            with open(resolved, "rb") as f:
+                header = f.read(64)
+            if header.startswith(b"#!") and b"python" in header.split(b"\n")[0]:
+                continue
+        except OSError:
+            continue
+        return resolved
 
     # Try cargo target directory (development)
     workspace_root = pkg_dir.parent.parent
