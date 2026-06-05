@@ -1,8 +1,9 @@
 site_name: rpytest
 site_description: Rust-powered, drop-in replacement for pytest
-site_url: https://rpytest.dev
+site_url: https://rpytest.docs.neullabs.com/
 repo_url: https://github.com/neul-labs/rpytest
-repo_name: rpytest
+repo_name: neul-labs/rpytest
+edit_uri: edit/main/documentation/docs/
 
 theme:
   name: material

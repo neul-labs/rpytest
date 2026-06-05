@@ -1,45 +1,89 @@
 # rpytest
 
-**Rust-powered, drop-in replacement for pytest**
+**Run your pytest suite faster. Change nothing.**
 
-rpytest is a high-performance test runner that provides full pytest compatibility while delivering significant speed improvements through its hybrid Rust/Python architecture.
+rpytest is a Rust-powered, drop-in replacement for `pytest` that eliminates
+startup and collection overhead while keeping your existing tests, fixtures,
+and plugins completely untouched.
+
+```bash
+pip install rpytest
+rpytest
+```
 
 ## Why rpytest?
 
-| Feature | pytest | rpytest |
-|---------|--------|---------|
-| Execution Speed | Baseline | **1.2x faster** |
-| Memory Usage | 39 MB | **6 MB** (6.7x less) |
-| Startup Time | ~600ms | **~300ms** (2x faster) |
-| Parallel Mode | pytest-xdist required | **Built-in** |
+| Metric | pytest | rpytest | Improvement |
+|--------|--------|---------|-------------|
+| Wall clock (500 tests, sequential) | 0.63s | 0.32s | **2.0x faster** |
+| CLI memory usage | 39.4 MB | 5.9 MB | **6.7x less** |
+| Collection (1000 files) | 8.5s | 0.3s | **28x faster** |
+| Parallel mode | pytest-xdist required | **Built-in `-n`** | no plugin |
+
+Benchmarks come from `BENCHMARK.md` in the repo and are reproducible with
+`benchmark_suite/` and `run_benchmark.py`.
+
+The speed comes from a persistent daemon that keeps Python warm between
+runs. No more paying interpreter startup costs on every invocation.
 
 ## Key Features
 
-- **Drop-in Replacement**: Use the same CLI flags, configuration files, and plugins
-- **Blazing Fast**: Rust CLI with warm Python daemon eliminates startup overhead
-- **Built-in Parallelism**: Native `-n` flag support without pytest-xdist
-- **Smart Sharding**: Duration-balanced test distribution for CI/CD
-- **Flakiness Detection**: Automatic tracking and rerun of flaky tests
-- **Watch Mode**: Re-run affected tests on file changes
-- **Low Memory**: Lightweight Rust binary, shared daemon for multiple runs
+- **Drop-in replacement**: same CLI flags (`-k`, `-m`, `-x`, `--maxfail`,
+  `--lf`, `--ff`, `-n`, ...), same config files (`pytest.ini`,
+  `pyproject.toml`, `tox.ini`, `setup.cfg`), same fixtures and markers.
+- **Persistent daemon**: keeps the Python interpreter warm; subsequent runs
+  are RPC calls, not cold starts.
+- **Built-in parallelism**: `-n auto` with duration-aware LPT scheduling.
+  No `pytest-xdist` required.
+- **Sharding for CI**: `--shard`/`--total-shards` with `hash`,
+  `round_robin`, or `duration_balanced` strategies.
+- **Watch mode**: `--watch` re-runs affected tests on file changes.
+- **Flakiness detection**: `--reruns N`, `--reruns-delay`,
+  `--only-rerun-flaky`, `--flaky-report`.
+- **Fixture reuse**: `--reuse-fixtures` persists session fixtures between
+  runs with mtime-based invalidation.
+- **Editor integration**: JSON-RPC server for IDE plugins
+  (`--editor-server`).
+- **Drop-in verification**: `--verify-dropin` runs both pytest and rpytest
+  on your suite and compares collection counts, results, and exit codes.
 
-## Quick Example
+## Install
 
 ```bash
-# Install rpytest (both CLI and daemon are required)
+# pip (recommended) - bundles platform binary
+pip install rpytest
+
+# Homebrew (macOS / Linux)
+brew tap neul-labs/tap
+brew install rpytest
+
+# npm
+npm install -g rpytest
+
+# cargo (installs CLI + daemon)
 cargo install rpytest rpytest-daemon
+```
 
-# Run tests (same as pytest!)
-rpytest tests/
+See [Installation](getting-started/installation.md) for build-from-source
+and platform notes.
 
-# Run with 4 parallel workers
-rpytest tests/ -n 4
+## Quick example
 
-# Watch mode
-rpytest tests/ --watch
+```bash
+# Run all tests (same UX as pytest)
+rpytest
 
-# Collect only
-rpytest tests/ --collect-only
+# Filter by keyword and marker
+rpytest -k "auth" -m "not slow"
+
+# Parallel execution (no plugin needed)
+rpytest -n auto
+
+# Watch mode for TDD
+rpytest --watch
+
+# Confirm identical behaviour vs pytest
+rpytest --verify-dropin
 ```
 
 ## Architecture
@@ -90,4 +134,4 @@ rpytest is designed to be a drop-in replacement for pytest:
 
 ## License
 
-rpytest is dual-licensed under MIT and Apache 2.0.
+rpytest is licensed under the [MIT License](https://github.com/neul-labs/rpytest/blob/main/LICENSE).

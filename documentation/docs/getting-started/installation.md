@@ -6,15 +6,52 @@
 - **Operating System**: Linux, macOS (Windows support coming soon)
 - **Rust**: 1.75+ (only for building from source)
 
-## Install from Cargo
+## Install via pip (recommended)
 
-The recommended way to install rpytest:
+The PyPI package bundles a prebuilt platform binary, so it's the
+zero-config option:
+
+```bash
+pip install rpytest
+```
+
+Or with [uv](https://github.com/astral-sh/uv):
+
+```bash
+uv pip install rpytest
+```
+
+## Install via Homebrew
+
+For macOS and Linux:
+
+```bash
+brew tap neul-labs/tap
+brew install rpytest
+```
+
+## Install via npm
+
+For workflows that already use npm/pnpm/yarn:
+
+```bash
+npm install -g rpytest
+```
+
+## Install via cargo
+
+`cargo install` installs the CLI **and** the daemon - both are required:
 
 ```bash
 cargo install rpytest rpytest-daemon
 ```
 
-## Install from Source
+!!! warning "Both binaries required"
+    rpytest delegates execution to a separate `rpytest-daemon` binary.
+    When installing via `cargo install`, you must install both packages.
+    `pip`, `brew`, and `npm` distributions bundle everything together.
+
+## Install from source
 
 Clone and build:
 
@@ -27,20 +64,11 @@ cargo build --release
 export PATH="$PWD/target/release:$PATH"
 ```
 
-## Python Dependencies
-
-rpytest requires the Python package to be installed in your project's virtual environment:
+Or install both crates from the workspace:
 
 ```bash
-# Using pip
-pip install rpytest
-
-# Using uv
-uv pip install rpytest
-
-# Or install from source
-cd packages/pypi/
-pip install -e .
+cargo install --path crates/rpytest
+cargo install --path crates/rpytest-daemon
 ```
 
 ## Verify Installation
