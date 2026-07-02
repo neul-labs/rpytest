@@ -7,6 +7,8 @@
 [![npm Version](https://img.shields.io/npm/v/rpytest.svg)](https://www.npmjs.com/package/rpytest)
 [![License](https://img.shields.io/npm/l/rpytest.svg)](https://github.com/neul-labs/rpytest/blob/main/LICENSE)
 
+**[Website](https://rpytest.neullabs.com)** · **[Documentation](https://docs.neullabs.com/rpytest)** · **[GitHub](https://github.com/neul-labs/rpytest)**
+
 ## Why rpytest?
 
 ```
@@ -90,6 +92,20 @@ cd rpytest && cargo install --path crates/rpytest
 ## Documentation
 
 Full docs at [docs.neullabs.com/rpytest](https://docs.neullabs.com/rpytest)
+
+## Part of the Neul Labs toolchain
+
+Explore the rest of the Neul Labs developer tools:
+
+| Project | Description |
+| --- | --- |
+| [rjest](https://github.com/neul-labs/rjest) | A blazing-fast, Jest-compatible test runner — 100x faster warm runs. |
+| [rninja](https://github.com/neul-labs/rninja) | Drop-in Ninja replacement with built-in caching. |
+| [gity](https://github.com/neul-labs/gity) | Make large Git repositories feel instant. |
+| [stkd](https://github.com/neul-labs/stkd) | Stacked diffs for GitHub and GitLab. |
+| [grite](https://github.com/neul-labs/grite) | The issue tracker that lives in your repo. Built for AI agents. |
+
+Learn more at [neullabs.com](https://www.neullabs.com).
 
 ## License
 

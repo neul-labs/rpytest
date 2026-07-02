@@ -10,6 +10,8 @@
 
 rpytest is a Rust-powered, drop-in replacement for `pytest` that eliminates startup and collection overhead while keeping your existing tests, fixtures, and plugins completely untouched.
 
+**[Website](https://rpytest.neullabs.com)** · **[Documentation](https://docs.neullabs.com/rpytest)** · **[GitHub](https://github.com/neul-labs/rpytest)**
+
 ```bash
 # Install and run - that's it
 pip install rpytest
@@ -160,6 +162,20 @@ cd rpytest
 cargo build
 cargo test
 ```
+
+## Part of the Neul Labs toolchain
+
+Explore the rest of the Neul Labs developer tools:
+
+| Project | Description |
+| --- | --- |
+| [rjest](https://github.com/neul-labs/rjest) | A blazing-fast, Jest-compatible test runner — 100x faster warm runs. |
+| [rninja](https://github.com/neul-labs/rninja) | Drop-in Ninja replacement with built-in caching. |
+| [gity](https://github.com/neul-labs/gity) | Make large Git repositories feel instant. |
+| [stkd](https://github.com/neul-labs/stkd) | Stacked diffs for GitHub and GitLab. |
+| [grite](https://github.com/neul-labs/grite) | The issue tracker that lives in your repo. Built for AI agents. |
+
+Learn more at [neullabs.com](https://www.neullabs.com).
 
 ## License
 
