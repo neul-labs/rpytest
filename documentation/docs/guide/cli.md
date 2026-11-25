@@ -468,6 +468,12 @@ Arguments after `--` are passed to the daemon/plugins:
 rpytest tests/ -- --cov=myapp --cov-report=html
 ```
 
+## Subprocess Errors
+
+In subprocess mode, a pytest invocation that aborts with a usage or collection
+error makes the rpytest run fail. A requested test without a recorded outcome
+is reported as an error.
+
 ## Environment Variables
 
 | Variable | Description |
