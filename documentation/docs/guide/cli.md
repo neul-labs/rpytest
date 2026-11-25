@@ -185,6 +185,11 @@ rpytest --durations=0 --durations-min=1.0  # Only tests > 1s
 
 ## Collection
 
+For supported literal parametrizations, rpytest preserves unique printable
+ASCII IDs without backslashes from a literal `ids` list or tuple. A row's
+`pytest.param(id=...)` takes precedence. Dynamic ID generation still depends
+on pytest's own collection.
+
 ### `--collect-only`, `--co`
 
 Only collect tests, don't run them.
