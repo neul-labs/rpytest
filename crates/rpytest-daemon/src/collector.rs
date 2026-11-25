@@ -514,7 +514,13 @@ impl NativeCollector {
     /// Extract parametrize info from decorator arguments.
     fn extract_parametrize_info(&self, decorator: &ast::Expr) -> Option<ParameterizedTestNode> {
         // Look for @pytest.mark.parametrize(args)
-        if let ast::Expr::Call(ast::ExprCall { func, args, .. }) = decorator {
+        if let ast::Expr::Call(ast::ExprCall {
+            func,
+            args,
+            keywords,
+            ..
+        }) = decorator
+        {
             let func_name = self.get_decorator_name(func);
             if func_name.as_deref() != Some("pytest.mark.parametrize") {
                 return None;
@@ -536,17 +542,29 @@ impl NativeCollector {
             };
 
             // Extract parameter values from second argument (with custom IDs and marks)
-            let param_values_with_info = self.extract_param_values_with_info(&args[1])?;
-
-            // Convert to the format expected by ParameterizedTestNode
-            // Now stores (values, custom_id, marks) tuples
-            let param_values: Vec<(Vec<String>, Option<String>, Vec<String>)> =
-                param_values_with_info
-                    .iter()
-                    .map(|(values, custom_id, marks)| {
-                        (values.clone(), custom_id.clone(), marks.clone())
-                    })
-                    .collect();
+            let mut param_values = self.extract_param_values_with_info(&args[1])?;
+            let ids_argument = keywords
+                .iter()
+                .find(|keyword| keyword.arg.as_deref() == Some("ids"))
+                .map(|keyword| &keyword.value)
+                .or_else(|| args.get(3));
+            if let Some(ids) = ids_argument.and_then(|expr| self.literal_parametrize_ids(expr)) {
+                let mut resolved_ids = std::collections::HashSet::new();
+                if ids.len() == param_values.len()
+                    && param_values
+                        .iter()
+                        .zip(&ids)
+                        .all(|((_, custom_id, _), id)| {
+                            resolved_ids.insert(custom_id.as_ref().unwrap_or(id))
+                        })
+                {
+                    for ((_, custom_id, _), id) in param_values.iter_mut().zip(ids) {
+                        if custom_id.is_none() {
+                            *custom_id = Some(id);
+                        }
+                    }
+                }
+            }
 
             Some(ParameterizedTestNode {
                 param_names,
@@ -556,6 +574,31 @@ impl NativeCollector {
         } else {
             None
         }
+    }
+
+    /// Read literal ID sequences whose strings are unaffected by pytest's escaping setting.
+    fn literal_parametrize_ids(&self, expr: &ast::Expr) -> Option<Vec<String>> {
+        let entries = match expr {
+            ast::Expr::List(list) => &list.elts,
+            ast::Expr::Tuple(tuple) => &tuple.elts,
+            _ => return None,
+        };
+        entries
+            .iter()
+            .map(|entry| match entry {
+                ast::Expr::Constant(constant) => match &constant.value {
+                    ast::Constant::Str(id)
+                        if id
+                            .bytes()
+                            .all(|byte| matches!(byte, b' '..=b'~') && byte != b'\\') =>
+                    {
+                        Some(id.clone())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
     }
 
     /// Extract parameter values from a parametrize argument list.
@@ -2063,6 +2106,41 @@ class TestClass:
 
         // Should not find any tests (no test_ prefix)
         assert!(tests.is_empty());
+    }
+
+    #[test]
+    fn test_collect_with_literal_parametrize_ids() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("test_ids.py"),
+            r#"
+import pytest
+
+@pytest.mark.parametrize("x", [1, 2], ids=["first", "second"])
+def test_kwargs(x):
+    pass
+
+class TestIDs:
+    @pytest.mark.parametrize("x", [pytest.param(1, id="row"), 2, 3], False, ("unused", "middle", "third"))
+    def test_positional(self, x):
+        pass
+"#,
+        )
+        .unwrap();
+
+        let tests = NativeCollector::new(dir.path()).collect().unwrap();
+        let mut node_ids: Vec<_> = tests.iter().map(|test| test.node_id.as_str()).collect();
+        node_ids.sort_unstable();
+        assert_eq!(
+            node_ids,
+            [
+                "test_ids.py::TestIDs::test_positional[middle]",
+                "test_ids.py::TestIDs::test_positional[row]",
+                "test_ids.py::TestIDs::test_positional[third]",
+                "test_ids.py::test_kwargs[first]",
+                "test_ids.py::test_kwargs[second]",
+            ]
+        );
     }
 
     #[test]

@@ -6,19 +6,17 @@
 //!
 //! Use `create_executor()` to automatically select the best available executor.
 
-use crate::error::Result;
+use crate::error::{DaemonError, Result};
 use crate::models::{ExecutionMode, TestOutcome, TestResult};
 use crate::pool::WorkerPool;
 use crate::scheduler::TestScheduler;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{ChildStderr, ChildStdout, Command as AsyncCommand};
+use tokio::process::Command as AsyncCommand;
 use tracing::{debug, error, info, warn};
 
 /// Trait for test executors providing a unified interface for running tests.
@@ -173,6 +171,11 @@ pub struct PythonExecutor {
     processes: Arc<Mutex<HashMap<String, tokio::process::Child>>>,
 }
 
+struct PytestOutput {
+    text: String,
+    failed: bool,
+}
+
 impl Default for PythonExecutor {
     fn default() -> Self {
         PythonExecutor {
@@ -205,20 +208,14 @@ impl PythonExecutor {
 
     /// Run a single test.
     pub async fn run_test(&self, node_id: &str) -> Result<TestResult> {
-        let output = self.run_pytest(&[node_id.to_string()], None).await;
-
-        // Parse output to determine outcome
-        let outcome = Self::parse_pytest_output(&output);
-        let duration_ms = Self::extract_duration(&output).unwrap_or(0);
-
-        Ok(TestResult {
-            node_id: node_id.to_string(),
-            outcome,
-            duration_ms,
-            message: Self::extract_message(&output),
-            stdout: None,
-            stderr: None,
-        })
+        let node_ids = [node_id.to_owned()];
+        let output = self.run_pytest(&node_ids).await?;
+        let mut result = self.parse_batch_output(&node_ids, &output).remove(0);
+        result.duration_ms = Self::extract_duration(&output.text).unwrap_or(0);
+        if result.message.is_none() {
+            result.message = Self::extract_message(&output.text);
+        }
+        Ok(result)
     }
 
     /// Run multiple tests in batch.
@@ -278,12 +275,27 @@ impl PythonExecutor {
 
     /// Run a batch of tests.
     async fn run_batch(&self, node_ids: &[String]) -> Vec<TestResult> {
-        let output = self.run_pytest(node_ids, None).await;
-        self.parse_batch_output(node_ids, output)
+        match self.run_pytest(node_ids).await {
+            Ok(output) => self.parse_batch_output(node_ids, &output),
+            Err(error) => {
+                let message = error.to_string();
+                node_ids
+                    .iter()
+                    .map(|node_id| TestResult {
+                        node_id: node_id.clone(),
+                        outcome: TestOutcome::Error,
+                        duration_ms: 0,
+                        message: Some(message.clone()),
+                        stdout: None,
+                        stderr: None,
+                    })
+                    .collect()
+            }
+        }
     }
 
     /// Run pytest with the given arguments.
-    async fn run_pytest(&self, node_ids: &[String], _output_file: Option<&str>) -> String {
+    async fn run_pytest(&self, node_ids: &[String]) -> Result<PytestOutput> {
         // Allow tests to bypass spawning a real Python interpreter.
         if std::env::var("RPYTEST_FAKE_PYTEST").is_ok() {
             let mut output = String::new();
@@ -291,7 +303,10 @@ impl PythonExecutor {
                 output.push_str(&format!("{} PASSED\n", node_id));
             }
             output.push_str(&format!("{} passed in 0.01s\n", node_ids.len()));
-            return output;
+            return Ok(PytestOutput {
+                text: output,
+                failed: false,
+            });
         }
 
         let mut args: Vec<String> = vec!["-m".to_string(), "pytest".to_string()];
@@ -302,8 +317,6 @@ impl PythonExecutor {
         }
 
         // Add configuration
-        // Use -v for verbose output with full test names (needed for parsing outcomes)
-        args.push("-v".to_string());
         args.push("--tb=short".to_string());
         args.push("--no-header".to_string());
 
@@ -316,208 +329,100 @@ impl PythonExecutor {
         // Add extra args
         args.extend(self.config.extra_args.clone());
 
-        // Allow output capture
-        args.push("--capture=no".to_string());
+        // Keep each test name and outcome together on a plain terminal line.
+        args.push("--verbosity=1".to_string());
+        args.push("--override-ini=verbosity_test_cases=1".to_string());
+        args.push("--capture=fd".to_string());
+        args.push("--color=no".to_string());
 
         debug!("Running: {} {:?}", self.python_path.display(), args);
 
-        let mut child = match AsyncCommand::new(&self.python_path)
+        let output = AsyncCommand::new(&self.python_path)
             .args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .spawn()
+            .output()
+            .await
+            .map_err(|error| {
+                DaemonError::PythonExecution(format!("could not run pytest: {}", error))
+            })?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let failed = match output.status.code() {
+            Some(0) => false,
+            Some(1) => true,
+            _ => {
+                let detail = stderr.lines().find(|line| !line.trim().is_empty());
+                let mut message = format!("pytest terminated with {}", output.status);
+                if let Some(detail) = detail {
+                    message.push_str(": ");
+                    message.push_str(detail);
+                }
+                return Err(DaemonError::PythonExecution(message));
+            }
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(PytestOutput {
+            text: format!("{}\n{}", stdout, stderr),
+            failed,
+        })
+    }
+
+    /// Parse explicit outcomes for the requested test IDs.
+    fn parse_batch_output(&self, node_ids: &[String], output: &PytestOutput) -> Vec<TestResult> {
+        let requested: HashSet<&str> = node_ids.iter().map(String::as_str).collect();
+        let mut outcomes = HashMap::with_capacity(node_ids.len());
+        for line in output.text.lines() {
+            let line = line.trim_start();
+            for (index, _) in line.match_indices(' ') {
+                let node_id = &line[..index];
+                if !requested.contains(node_id) {
+                    continue;
+                }
+                let outcome = match line[index..].split_whitespace().next() {
+                    Some("PASSED") => TestOutcome::Passed,
+                    Some("FAILED") => TestOutcome::Failed,
+                    Some("SKIPPED") => TestOutcome::Skipped,
+                    Some("ERROR") => TestOutcome::Error,
+                    Some("XFAIL") => TestOutcome::Xfail,
+                    Some("XPASS") => TestOutcome::Xpass,
+                    _ => continue,
+                };
+                outcomes.insert(node_id, outcome);
+                break;
+            }
+        }
+
+        let mut results: Vec<_> = node_ids
+            .iter()
+            .map(|node_id| {
+                let (outcome, message) = match outcomes.remove(node_id.as_str()) {
+                    Some(outcome) => (outcome, None),
+                    None => (
+                        TestOutcome::Error,
+                        Some("pytest did not report an outcome for this test".to_string()),
+                    ),
+                };
+                TestResult {
+                    node_id: node_id.clone(),
+                    outcome,
+                    duration_ms: 0,
+                    message,
+                    stdout: None,
+                    stderr: None,
+                }
+            })
+            .collect();
+        if output.failed
+            && !results
+                .iter()
+                .any(|result| matches!(result.outcome, TestOutcome::Failed | TestOutcome::Error))
         {
-            Ok(child) => child,
-            Err(e) => {
-                error!("Failed to spawn pytest: {}", e);
-                return format!("ERROR: Failed to spawn pytest: {}", e);
-            }
-        };
-
-        let stdout = match child.stdout.take() {
-            Some(stdout) => stdout,
-            None => {
-                error!("Failed to capture stdout");
-                return "ERROR: Failed to capture stdout".to_string();
-            }
-        };
-
-        let stderr = match child.stderr.take() {
-            Some(stderr) => stderr,
-            None => {
-                error!("Failed to capture stderr");
-                return "ERROR: Failed to capture stderr".to_string();
-            }
-        };
-
-        // Read output
-        let output = Self::read_output(stdout, stderr).await;
-
-        // Wait for process to complete
-        let status = match child.wait().await {
-            Ok(status) => status,
-            Err(e) => {
-                error!("Failed to wait on pytest: {}", e);
-                return format!("{}\nERROR: Failed to wait on pytest: {}", output, e);
-            }
-        };
-
-        let mut result = output;
-        if !status.success() {
-            result.push_str(&format!("\nExit code: {}", status));
-        }
-
-        result
-    }
-
-    /// Read stdout and stderr from a child process.
-    async fn read_output(stdout: ChildStdout, stderr: ChildStderr) -> String {
-        let mut output = String::new();
-
-        let mut stdout_reader = BufReader::new(stdout).lines();
-        let mut stderr_reader = BufReader::new(stderr).lines();
-
-        loop {
-            tokio::select! {
-                line = stdout_reader.next_line() => {
-                    match line {
-                        Ok(Some(l)) => {
-                            output.push_str(&l);
-                            output.push('\n');
-                        }
-                        Ok(None) => break,
-                        Err(_) => break,
-                    }
-                }
-                line = stderr_reader.next_line() => {
-                    match line {
-                        Ok(Some(l)) => {
-                            output.push_str(&l);
-                            output.push('\n');
-                        }
-                        Ok(None) => {}
-                        Err(_) => {}
-                    }
-                }
+            if let Some(result) = results.first_mut() {
+                result.outcome = TestOutcome::Error;
+                result.message =
+                    Some("pytest reported a failure without a matching outcome".to_string());
             }
         }
-
-        output
-    }
-
-    /// Parse batch output into individual test results.
-    /// Optimized single-pass implementation that extracts all outcomes efficiently.
-    fn parse_batch_output(&self, node_ids: &[String], output: String) -> Vec<TestResult> {
-        let mut results = Vec::with_capacity(node_ids.len());
-
-        // Pre-allocate HashMap with expected capacity (2x for test name variants)
-        let mut line_outcomes: HashMap<String, TestOutcome> =
-            HashMap::with_capacity(node_ids.len() * 2);
-
-        // Single pass: check all patterns at once for each line
-        for line in output.lines() {
-            // Split once and check the status word
-            let mut parts = line.split_whitespace();
-            let test_ref = match parts.next() {
-                Some(t) => t,
-                None => continue,
-            };
-
-            // Find outcome from the status word (usually second token)
-            let outcome = parts.find_map(|word| {
-                if word.starts_with("PASSED") {
-                    Some(TestOutcome::Passed)
-                } else if word.starts_with("FAILED") {
-                    Some(TestOutcome::Failed)
-                } else if word.starts_with("SKIPPED") {
-                    Some(TestOutcome::Skipped)
-                } else if word.starts_with("XFAIL") {
-                    Some(TestOutcome::Xfail)
-                } else if word.starts_with("XPASS") {
-                    Some(TestOutcome::Xpass)
-                } else {
-                    None
-                }
-            });
-
-            if let Some(outcome) = outcome {
-                // Store outcome by full reference
-                line_outcomes.insert(test_ref.to_string(), outcome.clone());
-                // Also store by test name (after last ::) for fallback matching
-                if let Some(pos) = test_ref.rfind("::") {
-                    let test_name = &test_ref[pos + 2..];
-                    line_outcomes.insert(test_name.to_string(), outcome);
-                }
-            }
-        }
-
-        // Check summary for overall counts
-        let summary_passed = output.contains(" passed]") || output.contains(" passed in");
-        let summary_failed = output.contains(" failed]") || output.contains(" failed in");
-        let summary_skipped = output.contains(" skipped]") || output.contains(" skipped in");
-        let has_errors = output.contains(" error]") || output.contains(" errors in");
-
-        for node_id in node_ids {
-            let mut outcome = TestOutcome::Error;
-
-            // Try to find outcome from line-by-line parsing
-            if let Some(line_outcome) = line_outcomes.get(node_id) {
-                outcome = line_outcome.clone();
-            } else {
-                // Try matching just the test name (after ::)
-                if let Some(pos) = node_id.find("::") {
-                    let test_name = &node_id[pos + 2..];
-                    if let Some(line_outcome) = line_outcomes.get(test_name) {
-                        outcome = line_outcome.clone();
-                    }
-                }
-            }
-
-            // If still not found, use summary as fallback
-            if matches!(outcome, TestOutcome::Error) {
-                if summary_passed && !summary_failed {
-                    outcome = TestOutcome::Passed;
-                } else if summary_failed && !summary_passed {
-                    outcome = TestOutcome::Failed;
-                } else if has_errors {
-                    outcome = TestOutcome::Error;
-                } else if summary_skipped {
-                    outcome = TestOutcome::Skipped;
-                } else {
-                    // Default to passed if we can't determine otherwise
-                    outcome = TestOutcome::Passed;
-                }
-            }
-
-            results.push(TestResult {
-                node_id: node_id.clone(),
-                outcome,
-                duration_ms: 0,
-                message: None,
-                stdout: None,
-                stderr: None,
-            });
-        }
-
         results
-    }
-
-    /// Parse pytest output to determine outcome.
-    fn parse_pytest_output(output: &str) -> TestOutcome {
-        if output.contains("1 passed") || output.contains("PASSED") {
-            return TestOutcome::Passed;
-        }
-        if output.contains("1 failed") || output.contains("FAILED") {
-            return TestOutcome::Failed;
-        }
-        if output.contains("1 skipped") || output.contains("SKIPPED") {
-            return TestOutcome::Skipped;
-        }
-        if output.contains("ERROR") {
-            return TestOutcome::Error;
-        }
-        TestOutcome::Error
     }
 
     /// Extract duration from pytest output.
@@ -703,16 +608,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_simple_test() {
-        let dir = TempDir::new().unwrap();
+        let pytest_available = AsyncCommand::new("python")
+            .args(["-m", "pytest", "--version"])
+            .output()
+            .await
+            .is_ok_and(|output| output.status.success());
+        if !pytest_available {
+            return;
+        }
+
+        let dir = TempDir::new_in(".").unwrap();
         let test_file = dir.path().join("test_example.py");
-        fs::write(&test_file, "def test_simple():\n    assert True\n").unwrap();
+        fs::write(
+            &test_file,
+            "def test_simple():\n    print('test output')\n    assert True\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("pytest.ini"),
+            "[pytest]\naddopts = -qq --color=yes -s\n",
+        )
+        .unwrap();
 
+        let dirname = dir.path().file_name().unwrap().to_string_lossy();
+        let node_id = format!("{}/test_example.py::test_simple", dirname);
         let executor = PythonExecutor::new(PathBuf::from("python"));
-        let result = executor.run_test("test_example.py::test_simple").await;
-
-        assert!(result.is_ok());
-        let result = result.unwrap();
-        assert_eq!(result.node_id, "test_example.py::test_simple");
+        let result = executor.run_test(&node_id).await.unwrap();
+        assert_eq!(result.node_id, node_id);
+        assert_eq!(result.outcome, TestOutcome::Passed);
     }
 
     #[test]
@@ -782,7 +705,7 @@ mod tests {
             "test_file.py::test_two".to_string(),
         ];
 
-        let results = executor.parse_batch_output(&node_ids, output.to_string());
+        let results = executor.parse_batch_output(&node_ids, &test_output(output, false));
         assert_eq!(results.len(), 2);
         assert!(matches!(results[0].outcome, TestOutcome::Passed));
         assert!(matches!(results[1].outcome, TestOutcome::Passed));
@@ -794,7 +717,7 @@ mod tests {
         let output = "test_file.py::test_fail FAILED\n";
         let node_ids = vec!["test_file.py::test_fail".to_string()];
 
-        let results = executor.parse_batch_output(&node_ids, output.to_string());
+        let results = executor.parse_batch_output(&node_ids, &test_output(output, true));
         assert_eq!(results.len(), 1);
         assert!(matches!(results[0].outcome, TestOutcome::Failed));
     }
@@ -805,7 +728,7 @@ mod tests {
         let output = "test_file.py::test_skip SKIPPED\n";
         let node_ids = vec!["test_file.py::test_skip".to_string()];
 
-        let results = executor.parse_batch_output(&node_ids, output.to_string());
+        let results = executor.parse_batch_output(&node_ids, &test_output(output, false));
         assert_eq!(results.len(), 1);
         assert!(matches!(results[0].outcome, TestOutcome::Skipped));
     }
@@ -816,7 +739,7 @@ mod tests {
         let output = "test_file.py::test_xfail XFAIL\n";
         let node_ids = vec!["test_file.py::test_xfail".to_string()];
 
-        let results = executor.parse_batch_output(&node_ids, output.to_string());
+        let results = executor.parse_batch_output(&node_ids, &test_output(output, false));
         assert_eq!(results.len(), 1);
         assert!(matches!(results[0].outcome, TestOutcome::Xfail));
     }
@@ -827,7 +750,7 @@ mod tests {
         let output = "test_file.py::test_xpass XPASS\n";
         let node_ids = vec!["test_file.py::test_xpass".to_string()];
 
-        let results = executor.parse_batch_output(&node_ids, output.to_string());
+        let results = executor.parse_batch_output(&node_ids, &test_output(output, false));
         assert_eq!(results.len(), 1);
         assert!(matches!(results[0].outcome, TestOutcome::Xpass));
     }
@@ -842,7 +765,7 @@ mod tests {
             "test_file.py::test_skip".to_string(),
         ];
 
-        let results = executor.parse_batch_output(&node_ids, output.to_string());
+        let results = executor.parse_batch_output(&node_ids, &test_output(output, true));
         assert_eq!(results.len(), 3);
         assert!(matches!(results[0].outcome, TestOutcome::Passed));
         assert!(matches!(results[1].outcome, TestOutcome::Failed));
@@ -850,43 +773,37 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_batch_output_summary_fallback() {
+    fn test_parse_batch_output_requires_explicit_outcome() {
         let executor = PythonExecutor::default();
-        // Output without explicit test result lines, but with summary
-        let output = "= 1 passed in 0.01s =\n";
+        let output = "other_file.py::test_one PASSED\n= 1 passed in 0.01s =\n";
         let node_ids = vec!["test_file.py::test_one".to_string()];
-
-        let results = executor.parse_batch_output(&node_ids, output.to_string());
-        assert_eq!(results.len(), 1);
-        assert!(matches!(results[0].outcome, TestOutcome::Passed));
+        let results = executor.parse_batch_output(&node_ids, &test_output(output, false));
+        assert_eq!(results[0].outcome, TestOutcome::Error);
     }
 
     #[test]
-    fn test_parse_pytest_output() {
-        assert!(matches!(
-            PythonExecutor::parse_pytest_output("1 passed"),
-            TestOutcome::Passed
-        ));
-        assert!(matches!(
-            PythonExecutor::parse_pytest_output("PASSED"),
-            TestOutcome::Passed
-        ));
-        assert!(matches!(
-            PythonExecutor::parse_pytest_output("1 failed"),
-            TestOutcome::Failed
-        ));
-        assert!(matches!(
-            PythonExecutor::parse_pytest_output("FAILED"),
-            TestOutcome::Failed
-        ));
-        assert!(matches!(
-            PythonExecutor::parse_pytest_output("1 skipped"),
-            TestOutcome::Skipped
-        ));
-        assert!(matches!(
-            PythonExecutor::parse_pytest_output("ERROR"),
-            TestOutcome::Error
-        ));
+    fn test_parse_batch_output_matches_ids_with_spaces() {
+        let executor = PythonExecutor::default();
+        let node_ids = vec!["test_file.py::test_one[with spaces]".to_string()];
+        let output = "test_file.py::test_one[with spaces] SKIPPED (reason) [100%]\n";
+        let results = executor.parse_batch_output(&node_ids, &test_output(output, false));
+        assert_eq!(results[0].outcome, TestOutcome::Skipped);
+    }
+
+    #[test]
+    fn test_parse_batch_output_retains_unreported_nonzero_exit() {
+        let executor = PythonExecutor::default();
+        let node_ids = vec!["test_file.py::test_one".to_string()];
+        let output = "test_file.py::test_one PASSED [100%]\n";
+        let results = executor.parse_batch_output(&node_ids, &test_output(output, true));
+        assert_eq!(results[0].outcome, TestOutcome::Error);
+    }
+
+    fn test_output(text: &str, failed: bool) -> PytestOutput {
+        PytestOutput {
+            text: text.into(),
+            failed,
+        }
     }
 
     #[test]
