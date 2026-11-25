@@ -185,8 +185,8 @@ rpytest --durations=0 --durations-min=1.0  # Only tests > 1s
 
 ## Collection
 
-For supported literal parametrizations, rpytest preserves unique printable
-ASCII IDs without backslashes from a literal `ids` list or tuple. A row's
+For a supported single literal parametrization, rpytest preserves unique
+printable ASCII IDs without backslashes from a literal `ids` list or tuple. A row's
 `pytest.param(id=...)` takes precedence. Dynamic ID generation still depends
 on pytest's own collection.
 
@@ -477,7 +477,9 @@ rpytest tests/ -- --cov=myapp --cov-report=html
 
 In subprocess mode, a pytest invocation that aborts with a usage or collection
 error makes the rpytest run fail. A requested test without a recorded outcome
-is reported as an error.
+is reported as an error. The executor requests verbose per-test status lines,
+captures test output, and disables color in pytest's terminal report so an
+outcome can be matched to its test ID.
 
 ## Environment Variables
 

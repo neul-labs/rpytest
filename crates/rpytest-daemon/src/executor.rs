@@ -317,8 +317,6 @@ impl PythonExecutor {
         }
 
         // Add configuration
-        // Use -v for verbose output with full test names (needed for parsing outcomes)
-        args.push("-v".to_string());
         args.push("--tb=short".to_string());
         args.push("--no-header".to_string());
 
@@ -331,8 +329,11 @@ impl PythonExecutor {
         // Add extra args
         args.extend(self.config.extra_args.clone());
 
-        // Allow output capture
-        args.push("--capture=no".to_string());
+        // Keep each test name and outcome together on a plain terminal line.
+        args.push("--verbosity=1".to_string());
+        args.push("--override-ini=verbosity_test_cases=1".to_string());
+        args.push("--capture=fd".to_string());
+        args.push("--color=no".to_string());
 
         debug!("Running: {} {:?}", self.python_path.display(), args);
 
@@ -342,7 +343,7 @@ impl PythonExecutor {
             .output()
             .await
             .map_err(|error| {
-                DaemonError::PythonExecution(format!("could not run pytest: {error}"))
+                DaemonError::PythonExecution(format!("could not run pytest: {}", error))
             })?;
         let stderr = String::from_utf8_lossy(&output.stderr);
         let failed = match output.status.code() {
@@ -360,7 +361,7 @@ impl PythonExecutor {
         };
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(PytestOutput {
-            text: format!("{stdout}\n{stderr}"),
+            text: format!("{}\n{}", stdout, stderr),
             failed,
         })
     }
@@ -618,10 +619,19 @@ mod tests {
 
         let dir = TempDir::new_in(".").unwrap();
         let test_file = dir.path().join("test_example.py");
-        fs::write(&test_file, "def test_simple():\n    assert True\n").unwrap();
+        fs::write(
+            &test_file,
+            "def test_simple():\n    print('test output')\n    assert True\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("pytest.ini"),
+            "[pytest]\naddopts = -qq --color=yes -s\n",
+        )
+        .unwrap();
 
         let dirname = dir.path().file_name().unwrap().to_string_lossy();
-        let node_id = format!("{dirname}/test_example.py::test_simple");
+        let node_id = format!("{}/test_example.py::test_simple", dirname);
         let executor = PythonExecutor::new(PathBuf::from("python"));
         let result = executor.run_test(&node_id).await.unwrap();
         assert_eq!(result.node_id, node_id);
